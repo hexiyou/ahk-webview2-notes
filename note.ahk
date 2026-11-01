@@ -97,7 +97,8 @@ class App {
         App.Anchor := g
 
         ; 唤醒消息：WM_APP + 1
-        OnMessage(0x8001, (*) => App.ShowAll())
+        ; 走定时器而不是直接调：ShowAll 要建窗，OnMessage 线程里 await 有风险
+        OnMessage(0x8001, (*) => NoteShowAllSoon())
 
         ; 7) 装载便签（分批，见 BootTick）
         App.Log("启动，数据目录 " App.DataDir "，SQLite " Sqlite.Version())
@@ -113,6 +114,8 @@ class App {
             SetTimer(SelfTestShowAll, -2500)
         if App.HasArg("--selftest-menu")
             SetTimer(SelfTestMenu, -2500)
+        if App.HasArg("--selftest-keys")
+            SetTimer(SelfTestKeys, -2500)
 
         ; 8) 几何变化巡检：拖动/缩放结束后把位置写回库
         SetTimer(NoteGeoTick, 800)
@@ -183,6 +186,7 @@ class App {
         n := App.Store.Get(id)
         w := NoteWindow(n)
         w.ToFront()
+        App.RefreshList()
         return w
     }
 
@@ -297,16 +301,16 @@ class App {
     static BuildTray() {
         t := A_TrayMenu
         t.Delete()
-        t.Add("便签列表…`tCtrl+Alt+L", (*) => App.ShowList())
-        t.Add("新建便签`tCtrl+Alt+N", (*) => App.NewNote())
+        t.Add("便签列表…`tCtrl+Alt+L", (*) => NoteDeferList())
+        t.Add("新建便签`tCtrl+Alt+N", (*) => NoteDeferNew())
         t.Add()
-        t.Add("全部显示", (*) => App.ShowAll())
+        t.Add("全部显示", (*) => NoteShowAllSoon())
         t.Add("全部收起", (*) => App.HideAll())
         t.Add("透明外观", (*) => App.ToggleAppearance())
         t.Add()
         t.Add("数据目录…", (*) => Run(App.DataDir))
         t.Add("打开日志", (*) => App.OpenLog())
-        t.Add("重新加载全部", (*) => App.ReloadAll())
+        t.Add("重新加载全部", (*) => SetTimer(NoteReloadTick, -10))
         t.Add()
         t.Add("退出", (*) => App.Quit())
         t.Default := "便签列表…`tCtrl+Alt+L"
@@ -335,15 +339,36 @@ class App {
     /* 不用 Map 装"热键->回调"：箭头函数写在 Map(...) 的参数里时配对极易出错，
        报错是 "Invalid callback function"（拿到的其实是字符串键）。顺序写清楚最稳。 */
     static BindHotkeys() {
-        App.BindOne(App.Cfg("hotkey", "new", "^!n"), App.NewNote)
-        App.BindOne(App.Cfg("hotkey", "list", "^!l"), App.ShowList)
-        App.BindOne(App.Cfg("hotkey", "toggle", "^!h"), App.ToggleAll)
+        App.BindOne(App.Cfg("hotkey", "new", "^!n"), NoteDeferNew)
+        App.BindOne(App.Cfg("hotkey", "list", "^!l"), NoteDeferList)
+        App.BindOne(App.Cfg("hotkey", "toggle", "^!h"), NoteToggle)
+        App.BindListKeys()
     }
 
+    /* 列表窗口里的 Ctrl+N。
+       页面里也写了一份（list.js），但 WebView2 默认把 Ctrl+N 当"新建窗口"这类
+       浏览器快捷键吃掉，页面收不到 —— 用户按下去就是"毫无反应"。所以这里用条件
+       热键直接接管（只在列表窗口是前台时生效，不干扰别的程序）。
+
+       注意传的是 NoteDeferNew 而不是 App.NewNote：热键线程里直接建窗虽然目前能过，
+       但建窗要 await WebView2，一律走独立线程最稳。 */
+    static BindListKeys() {
+        try {
+            HotIf(ListHotkeyCond)
+            Hotkey("^n", (*) => NoteDeferNew(), "On")
+            HotIf()
+            App.Log("列表 Ctrl+N 已注册（仅在列表窗口激活时生效）")
+        } catch as e {
+            App.Log("列表 Ctrl+N 注册失败：" CleanComError(e.Message))
+        }
+    }
+
+    /* 热键回调会被传入"触发的热键名"这一个参数，而 AHK 在调用点严格检查个数。
+       所以统一套一层变参箭头吃掉它（和菜单的 MB 是同一个坑）。 */
     static BindOne(key, fn) {
         if (key = "")
             return
-        try Hotkey(key, fn, "On")
+        try Hotkey(key, (*) => fn.Call(), "On")
         catch as e
             App.Log("热键 " key " 注册失败：" CleanComError(e.Message))
     }
@@ -353,7 +378,7 @@ class App {
         want := App.Ctx.appearance.transparent ? 0 : 1
         App.Ctx.appearance.transparent := want
         App.SetCfg("appearance", "transparent", want)
-        App.ReloadAll()
+        SetTimer(NoteReloadTick, -10)       ; 重建窗口是重活，别在菜单回调里做
         App.Toast(want ? "已切换到透明外观" : "已切换到不透明外观")
     }
 
@@ -364,7 +389,7 @@ class App {
         if (shown > 0)
             App.HideAll()
         else
-            App.ShowAll()
+            NoteShowAllSoon()       ; 显示要建窗，一样走独立线程
     }
 
     static ReloadAll() {
@@ -567,9 +592,41 @@ SelfTestMenu() {
     ExitApp 0
 }
 
+/* 自检：列表窗口的 Ctrl+N 链路。
+   本机沙箱里注入键盘会卡死，所以验不到"按下键"这一步，只验：
+     1) ^n 注册时没抛异常（BindListKeys 会留一条日志）
+     2) 条件热键的判定函数随窗口开关正确翻转
+     3) 热键真正调用的那个函数能在不卡死的前提下建出便签 */
+SelfTestKeys() {
+    /* 注意：AHK 2.0.31 的 Hotkey(KeyName) 恒返回空串，查不到"注册了没有"，
+       所以注册状态只能靠 BindListKeys 的日志（没有"注册失败"就是成功）。 */
+    App.Log("SELFTEST 开始：热键日志见 BindListKeys")
+    App.Log("SELFTEST 列表未开时 IsActive=" ListWindow.IsActive())
+    App.ShowList()
+    Sleep 1500
+    App.Log("SELFTEST 列表打开后 IsActive=" ListWindow.IsActive())
+    before := App.Store.Count()
+    NoteDeferNew()
+    Sleep 2500
+    App.Log("SELFTEST 调 NoteDeferNew 后：窗口 " NoteWindow.All.Count . " 个，库里 " App.Store.Count() . " 张")
+    App.Log("SELFTEST 结论：" (App.Store.Count() = before + 1 && NoteWindow.All.Count >= 1 ? "通过" : "未通过"))
+    ExitApp 0
+}
+
 ; ---- 顶层包装：SetTimer / OnError 传类静态方法引用会踩坑，统一走这里 ----------
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
+NoteShowList() => App.ShowList()
+/* NoteDeferNew / NoteDeferList 定义在 lib\note-window.ahk 里（用它们的地方在那儿），
+   这里只保证 note.ahk 的外部调用不需要知道细节。 */
+NoteShowAllSoon() {
+    SetTimer(NoteShowAll, -10)
+}
+NoteToggle() => App.ToggleAll()
+/* Ctrl+N 的条件：只有列表窗口是前台时才生效。
+   必须用命名函数：实测内联箭头传给 HotIf 会报 "Invalid callback function"。 */
+ListHotkeyCond(hk) => ListWindow.IsActive()
+NoteReloadTick() => App.ReloadAll()
 NoteOpen(id) => App.OpenNote(id)
 NoteDelete(id) => App.DeleteNote(id)
 NoteHide(id) => App.HideNote(id)

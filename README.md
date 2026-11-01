@@ -84,6 +84,14 @@ runtime\AutoHotkey64.exe note.ahk
 | `Ctrl+Alt+L` | 打开便签列表 |
 | `Ctrl+Alt+H` | 全部收起 / 再按全部显示 |
 
+列表窗口内：
+
+| 按键 | 作用 |
+|---|---|
+| `Ctrl+N` | 新建便签（宿主级条件热键，页面里那套也保留了作兜底） |
+| `Enter` | 打开第一条（搜索框里按） |
+| `Esc` | 清空搜索词；再按一次关窗 |
+
 ### 便签上的按钮
 
 右上角四个小图标（鼠标移上去才显示）：
@@ -242,6 +250,12 @@ runtime\AutoHotkey64.exe tools\e2e.ahk
 # 列表面板：渲染/搜索/回调（11 项断言）
 runtime\AutoHotkey64.exe tools\probe-list.ahk
 
+# 列表顺序稳定性：编辑/打开/搜索都不许改变顺序（10 项断言，很快）
+runtime\AutoHotkey64.exe tools\probe-sort.ahk
+
+# 回归"点完新建就拖不动"：真鼠标点「新建」再拖两个窗口（8 项断言，需先启动 run.bat）
+runtime\AutoHotkey64.exe tools\probe-newbug.ahk
+
 # 菜单：回调参数个数、闭包、菜单项是否都包了包装器（41 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-menu.ahk
 
@@ -250,6 +264,9 @@ runtime\AutoHotkey64.exe note.ahk --selftest-showall
 
 # 程序级自检：把菜单弹出来（会一直开着，Ctrl+C 或关掉即可）
 runtime\AutoHotkey64.exe note.ahk --selftest-menu
+
+# 程序级自检：Ctrl+N 链路（热键注册 + 条件判定 + 延迟建窗不卡死）
+runtime\AutoHotkey64.exe note.ahk --selftest-keys
 
 # 数据层
 runtime\AutoHotkey64.exe tools\probe-store.ahk
@@ -379,3 +396,36 @@ pwsh -File tools/make-icon.ps1
     直接在 `WebMessageReceived` 处理函数里调，等于卡住 WebView2 的同步调用。
     所以消息分发里只做 `SetTimer(ObjBindMethod(this, "ShowMenu"), -10)`，真正弹菜单放到下一个
     线程去跑。副作用是菜单打开期间主线程被占着（原生菜单固有行为），关掉即恢复。
+
+21. **★★ 绝不能在 `WebMessageReceived` 回调里建窗/关窗。** 这是本项目最凶的一个坑：
+    建窗要 `CreateControllerAsync(...).await()`，而在 COM 事件回调里 **await 永远等不到完成**，
+    整个线程就永久挂在那一句上。症状极具迷惑性——**定时器还在跑、按钮还能点、便签还能打字，
+    但页面发来的消息全都进不来了**，于是"拖动"（靠页面发 `drag-start`）先失效：
+    点一下列表窗口的「新建」，之后所有窗口都拖不动，但程序"没卡死"。
+    日志里能一眼看出：`NewNote 被调用` 之后，再也没有 `建窗完成`。
+    结论：回调里只读参数，动作一律 `SetTimer(..., -10)` 丢到独立线程去执行；
+    拖动这种必须即时的才同步处理（`StartMove` 本身不阻塞）。同理，托盘菜单、条件热键、
+    `OnMessage` 里调用建窗/关窗也全部走 `NoteDeferNew()` / `NoteDeferList()` 这一层。
+
+22. **★ 列表顺序不能用 `updated_at` 排。** 打开、编辑、改显示状态都会刷新 `updated_at`，
+    于是"点开哪张、哪张就窜到最前面"，看着就是"点一下就乱跳"。现在固定成
+    `pinned DESC, created_at DESC, id DESC`（置顶 → 新建的在前 → id 兜底），
+    编辑再多也不会动。`tools\probe-sort.ahk` 里 10 条断言盯着这件事（含"置顶允许插队"）。
+
+23. **★ 列表窗口里的 `Ctrl+N` 页面根本收不到。** WebView2 默认把 `Ctrl+N` 当"新建窗口"
+    这类浏览器快捷键吃掉，所以页面写 `keydown` 处理器也没用（表现：按了毫无反应）。
+    两道保险：① `AreBrowserAcceleratorKeysEnabled := 0`（官方文档明确说只关浏览器功能键，
+    不影响 `Ctrl+C/V/X/A/Z` 和 Home/End 这类编辑键）；② 用条件热键直接接管
+    `HotIf(ListHotkeyCond)` + `Hotkey("^n", ...)`，只在列表窗口是前台时生效。
+    注意条件必须是**命名函数**：内联箭头传给 `HotIf` 会报 `Invalid callback function`。
+
+24. **★ `#Warn` 会把"跨文件调用的顶层函数"判成未赋值变量。** `lib\note-window.ahk` 里写
+    `(*) => NoteDeferNew()`，当这个库被 `tools\probe-menu.ahk` 单独 include 时（没有 note.ahk），
+    AHK 认为 `NoteDeferNew` 是个从没赋值的局部变量，直接**弹一个模态警告框**把自动化测试卡住。
+    两个改法一起用：把封装定义挪进库文件本身，并且用 `SetTimer(Func("NoteNew"), -10)`
+    延迟解析函数名（`Func("...")` 里是字符串，编译期不会解析）。
+
+25. **AHK 的 `Map.Count` 是属性、自己类的 `Count()` 是方法。** 写 `App.Store.Count`
+    （漏括号）拿到的是**函数对象**，拼进字符串时报 `Expected a String but got a Func`，
+    行号还指在日志那一行，很难往这儿想。另外 `Hotkey(KeyName)` 在 2.0.31 上恒返回空串，
+    查不到"这个热键注册了没有"，只能靠注册时自己打日志。

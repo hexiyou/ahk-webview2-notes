@@ -173,15 +173,15 @@ class NoteWindow {
                 case "color":
                     this.DoColor(JsonStr(raw, "color", "yellow"))
                 case "close":
-                    this.Destroy()
-                    NoteWindow.Store.Delete(this.id)
-                    App.RefreshTray()
+                    ; 关窗要 wvc.Close()，不能在 COM 回调里等
+                    SetTimer(ObjBindMethod(this, "CloseSelf"), -10)
                 case "hide":
                     this.Hide()
                 case "new":
-                    App.NewNote()
+                    ; 建窗要 await WebView2 controller —— 在 COM 回调里 await 会永久挂住
+                    NoteDeferNew()
                 case "list":
-                    App.ShowList()
+                    NoteDeferList()
                 case "drag-start":
                     ; 页面在 manual 模式下把顶栏的 app-region 让出来，改由这里拖
                     this.StartMove()
@@ -201,6 +201,14 @@ class NoteWindow {
         } catch as e {
             App.Log("msg/" type " 出错：" CleanComError(e.Message) " @" e.Line)
         }
+    }
+
+    /* 关窗并删库。放在独立线程里跑：Destroy 里要 wvc.Close()，在 COM 回调里等
+       COM 对象同样是"等到死"的老坑。 */
+    CloseSelf() {
+        this.Destroy()
+        NoteWindow.Store.Delete(this.id)
+        App.RefreshTray()
     }
 
     PushInit() {
@@ -389,8 +397,8 @@ class NoteWindow {
     ShowMenu() {
         isMd := (this.note.mode = "md")
         m := Menu()
-        m.Add("新建便签", (*) => App.NewNote())
-        m.Add("便签列表…", (*) => App.ShowList())
+        m.Add("新建便签", (*) => NoteDeferNew())
+        m.Add("便签列表…", (*) => NoteDeferList())
         m.Add()
         m.Add(this.note.pinned ? "取消置顶" : "置顶"
             , NoteWindow.MB(ObjBindMethod(this, "TogglePin")))
@@ -425,11 +433,8 @@ class NoteWindow {
 
     ConfirmDelete() {
         r := MsgBox("删除这张便签？此操作不可撤销。", "便签", "YesNo Icon?")
-        if (r = "Yes") {
-            this.Destroy()
-            NoteWindow.Store.Delete(this.id)
-            App.RefreshTray()
-        }
+        if (r = "Yes")
+            SetTimer(ObjBindMethod(this, "CloseSelf"), -10)
     }
 
     ; ---- 销毁 ---------------------------------------------------------------
@@ -486,4 +491,16 @@ class NoteWindow {
     static FileUrl(p) {
         return "file:///" StrReplace(StrReplace(p, "\", "/"), " ", "%20")
     }
+}
+
+; ---- 延迟建窗（COM 回调里不能 await，必须换到 SetTimer 的独立线程） -----------
+; 这里刻意用 Func("...") 延迟解析函数名：本文件会被 tools\probe-menu.ahk 之类
+; 单独 include，那时 note.ahk 里的 NoteNew / NoteShowList 并不存在，裸写函数名
+; 会被 #Warn 判成"未赋值的局部变量"，直接弹一个模态警告框把测试卡死。
+NoteDeferNew() {
+    SetTimer(Func("NoteNew"), -10)
+}
+
+NoteDeferList() {
+    SetTimer(Func("NoteShowList"), -10)
 }

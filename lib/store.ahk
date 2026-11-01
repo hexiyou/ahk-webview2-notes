@@ -63,14 +63,21 @@ class Store {
 
     ; ---- 读 -----------------------------------------------------------------
 
-    ; 全部便签（含 hidden），最近更新的在前
+    /* 排序只用 created_at，不用 updated_at。
+       教训：按"最近更新"排的话，打开/编辑一张便签就会把它顶到最前，列表看着
+       就是"一点就乱跳"。用户要的是稳定顺序，所以固定成
+           置顶优先 → 新建的在前 → id 兜底（同一秒建的多张也有确定顺序）
+       想按"最近编辑"排是以后加排序选项的事，不能是默认行为。 */
+    static ORDER := " ORDER BY pinned DESC, created_at DESC, id DESC"
+
+    ; 全部便签（含 hidden）
     All() {
-        return this._Rows(this.db.Query("SELECT * FROM notes ORDER BY pinned DESC, updated_at DESC, id DESC"))
+        return this._Rows(this.db.Query("SELECT * FROM notes" . Store.ORDER))
     }
 
     ; 桌面上的那些：置顶优先
     Visible() {
-        return this._Rows(this.db.Query("SELECT * FROM notes WHERE hidden=0 ORDER BY pinned DESC, updated_at DESC, id DESC"))
+        return this._Rows(this.db.Query("SELECT * FROM notes WHERE hidden=0" . Store.ORDER))
     }
 
     Get(id) {
@@ -88,7 +95,7 @@ class Store {
         like := "%" t "%"
         sql := "SELECT * FROM notes WHERE hidden=0"
         sql .= " AND (title LIKE ? OR body_text LIKE ? OR body_md LIKE ?)"
-        sql .= " ORDER BY updated_at DESC, id DESC"
+        sql .= Store.ORDER
         return this._Rows(this.db.Query(sql, like, like, like))
     }
 
@@ -100,7 +107,7 @@ class Store {
             return this.All()
         like := "%" t "%"
         sql := "SELECT * FROM notes WHERE (title LIKE ? OR body_text LIKE ? OR body_md LIKE ?)"
-        sql .= " ORDER BY updated_at DESC, id DESC"
+        sql .= Store.ORDER
         return this._Rows(this.db.Query(sql, like, like, like))
     }
 

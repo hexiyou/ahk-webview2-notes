@@ -19,6 +19,13 @@ class ListWindow {
 
     static IsOpen() => ListWindow.Win ? 1 : 0
 
+    ; 列表窗口当前是不是前台（Ctrl+N 条件热键用这个判断）
+    static IsActive() {
+        if !ListWindow.Win
+            return 0
+        return WinActive("ahk_id " ListWindow.Win.gui.Hwnd) ? 1 : 0
+    }
+
     static Open() {
         if ListWindow.Win {
             try {
@@ -60,7 +67,12 @@ class ListWindow {
             wvc.DefaultBackgroundColor := 0xFFFDF8EE
             wv.Settings.IsNonClientRegionSupportEnabled := 1
             wv.Settings.AreDefaultContextMenusEnabled := 0
+            wv.Settings.IsStatusBarEnabled := 0
             wv.Settings.AreDevToolsEnabled := ctx.devtools ? 1 : 0
+            /* 关掉浏览器自带的快捷键（Ctrl+N / Ctrl+P / F5 之类）。不关的话
+               Ctrl+N 会被 WebView2 当"新建窗口"吃掉，页面根本收不到 —— 表现就是
+               "按了 Ctrl+N 毫无反应"。开了 devtools 时保留，否则 F12 也被禁。 */
+            wv.Settings.AreBrowserAcceleratorKeysEnabled := ctx.devtools ? 1 : 0
         }
         wvc.Fill()
         wvc.IsVisible := 1
@@ -108,14 +120,36 @@ class ListWindow {
         }
     }
 
+    /* ★ 这里是 WebView2 的 COM 事件回调。AHK 在这种回调里的线程"不能等"：
+       一旦在里面 await（建窗、关窗都要 await controller），await 永远等不到
+       完成，整个线程就永久挂在那一句上。之后定时器照跑、按钮照点，但页面发来
+       的消息再也进不来（拖动恰好也靠这些消息）—— 用户看到的就是
+       "点完『新建』，两个窗口都拖不动了，但并没有卡死"。
+       实测：app.log 里 "NewNote 被调用" 之后，再也没有"建窗完成"。
+
+       所以回调里只做两件事：读参数、处理必须即时的拖动；其余一律交给
+       SetTimer(..., -10) 起一个独立线程去做。 */
     static OnMessage(sender, args) {
         raw := ""
         try raw := args.WebMessageAsJson
         if (raw = "")
             return
+        type := JsonStr(raw, "type")
+
+        if (type = "drag-start") {
+            try ListWindow.StartMove()
+            catch as e
+                App.Log("list 拖动出错：" CleanComError(e.Message) " @" e.Line)
+            return
+        }
+        SetTimer(ListTick(raw, type), -10)
+    }
+
+    ; 真正干活的地方：跑在 SetTimer 起的独立线程里，可以安全地 await / 弹菜单 / 建窗
+    static Handle(raw, type) {
         h := ListWindow.Hooks
         try {
-            switch JsonStr(raw, "type") {
+            switch type {
                 case "ready":
                     ListWindow.PushInit()
                     ListWindow.Push()
@@ -154,16 +188,13 @@ class ListWindow {
                     ListWindow.Push(ListWindow.Query)
                 case "data-dir":
                     ListWindow.Call("onDataDir")
-                case "drag-start":
-                    ListWindow.StartMove()
                 case "menu":
-                    ; 菜单会阻塞线程，别在 COM 回调里弹
-                    SetTimer(ListMenuTick(JsonNum(raw, "id")), -10)
+                    ListWindow.ShowMenu(JsonNum(raw, "id"))
                 case "close":
                     ListWindow.Close()
             }
         } catch as e {
-            App.Log("list 消息出错：" CleanComError(e.Message) " @" e.Line)
+            App.Log("list 消息出错：" type " / " CleanComError(e.Message) " @" e.Line)
         }
     }
 
@@ -268,8 +299,8 @@ ListRefill() => ListWindow.Refill()
 ; 每个函数返回一个"零参闭包"，由 ListWindow.Cb 再包一层变参箭头。
 ; 必须经过函数参数转一手：闭包捕获的是变量本身，直接在 for 循环体里写箭头，
 ; 所有菜单项会一起指向循环结束时的最后一个值。
-ListMenuTick(id) {
-    return () => ListWindow.ShowMenu(id)
+ListTick(raw, type) {
+    return () => ListWindow.Handle(raw, type)
 }
 
 ListMenuOpen(id) {
