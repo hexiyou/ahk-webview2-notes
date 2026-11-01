@@ -1,0 +1,28 @@
+# ── 运行时数据（数据库 / 日志 / WebView2 缓存，每台机器各一份） ──
+data/
+dist/data/
+.webview2/
+
+# ── 测试与调试产物（临时脚本一律 _ 前缀） ──
+_*.txt
+_*.log
+_*.err
+_*.bmp
+_*.ahk
+*.log
+
+# ── 编译产物 ──
+dist/
+
+# ── 编辑器与系统噪音 ──
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# ── AutoHotkey 帮助文档（2MB，非运行必需） ──
+runtime/AutoHotkey.chm
+
+# ── 图标中间产物（只提交 note.ico） ──
+assets/note-*.png

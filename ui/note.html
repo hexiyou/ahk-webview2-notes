@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>便签</title>
+  <link rel="stylesheet" href="note.css">
+</head>
+
+<body data-color="yellow">
+  <div class="note" id="note">
+    <header class="bar" id="bar">
+      <div class="drag-zone"></div>
+      <div class="tools">
+        <button class="tool" id="btnMd" title="Markdown 源码 (Ctrl+M)" aria-label="Markdown">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <path d="M3 6h18v12H3z" fill="none" stroke="currentColor" stroke-width="1.6" />
+            <path d="M6 15V9l2.2 3L10.4 9v6" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <path d="M16 9v6m0 0l-2-2m2 2l2-2" fill="none" stroke="currentColor" stroke-width="1.4" />
+          </svg>
+        </button>
+        <button class="tool" id="btnPin" title="置顶" aria-label="置顶">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <path d="M9 4h6l-1 6 3 3H7l3-3-1-6z" fill="none" stroke="currentColor" stroke-width="1.6"
+              stroke-linejoin="round" />
+            <path d="M12 13v7" stroke="currentColor" stroke-width="1.6" />
+          </svg>
+        </button>
+        <button class="tool" id="btnMenu" title="更多" aria-label="更多">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <circle cx="6" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="18" cy="12" r="1.6" fill="currentColor" />
+          </svg>
+        </button>
+        <button class="tool close" id="btnClose" title="删除这张便签" aria-label="删除">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="body">
+      <div id="editor" class="editor" contenteditable="true" spellcheck="false"
+        data-placeholder="写点什么…"></div>
+      <textarea id="source" class="source" spellcheck="false" hidden></textarea>
+    </main>
+
+    <footer class="status" id="status">
+      <span id="hint"></span>
+      <span id="count"></span>
+    </footer>
+
+    <div class="grip" id="grip" title="拖动调整大小"></div>
+  </div>
+
+  <div class="floatbar" id="floatbar" hidden>
+    <button data-cmd="bold" title="加粗 Ctrl+B"><b>B</b></button>
+    <button data-cmd="italic" title="斜体 Ctrl+I"><i>I</i></button>
+    <button data-cmd="strikeThrough" title="删除线"><s>S</s></button>
+    <button data-cmd="formatBlock:h2" title="标题">H</button>
+    <button data-cmd="insertUnorderedList" title="无序列表">•</button>
+    <button data-cmd="insertOrderedList" title="有序列表">1.</button>
+    <button data-cmd="task" title="待办">☐</button>
+    <button data-cmd="code" title="行内代码">&lt;/&gt;</button>
+  </div>
+
+  <script src="md.js"></script>
+  <script src="note.js"></script>
+</body>
+
+</html>

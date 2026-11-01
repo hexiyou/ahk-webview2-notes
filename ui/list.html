@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>便签列表</title>
+  <link rel="stylesheet" href="list.css">
+</head>
+
+<body>
+  <header class="head" id="head">
+    <div class="title">便签</div>
+    <div class="actions">
+      <button id="btnNew" class="primary">新建</button>
+      <button id="btnClose" class="icon" title="关闭（Esc）" aria-label="关闭">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="searchbar">
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.2" fill="none" stroke="currentColor" stroke-width="1.7" />
+      <path d="M16 16l4.2 4.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+    </svg>
+    <input id="q" type="text" placeholder="搜索标题和正文…" autocomplete="off" spellcheck="false">
+  </div>
+
+  <main class="list" id="list"></main>
+
+  <footer class="foot">
+    <span id="count">—</span>
+    <span class="tip">Esc 关闭 · Ctrl+N 新建</span>
+  </footer>
+
+  <script src="list.js"></script>
+</body>
+
+</html>
