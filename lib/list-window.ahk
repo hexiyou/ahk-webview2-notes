@@ -140,14 +140,85 @@ class ListWindow {
                     if h && h.Has("onHide")
                         h["onHide"](JsonNum(raw, "id"))
                     ListWindow.Push(ListWindow.Query)
+                case "pin":
+                    ListWindow.Call("onPin", JsonNum(raw, "id"), JsonBool(raw, "on"))
+                    ListWindow.Push(ListWindow.Query)
+                case "color":
+                    ListWindow.Call("onColor", JsonNum(raw, "id"), JsonStr(raw, "color"))
+                    ListWindow.Push(ListWindow.Query)
+                case "show-all":
+                    ListWindow.Call("onShowAll")
+                    ListWindow.Push(ListWindow.Query)
+                case "hide-all":
+                    ListWindow.Call("onHideAll")
+                    ListWindow.Push(ListWindow.Query)
+                case "data-dir":
+                    ListWindow.Call("onDataDir")
                 case "drag-start":
                     ListWindow.StartMove()
+                case "menu":
+                    ; 菜单会阻塞线程，别在 COM 回调里弹
+                    SetTimer(ListMenuTick(JsonNum(raw, "id")), -10)
                 case "close":
                     ListWindow.Close()
             }
         } catch as e {
             App.Log("list 消息出错：" CleanComError(e.Message) " @" e.Line)
         }
+    }
+
+    ; 调一个宿主钩子；没有就静默跳过（列表窗口要能独立跑测试）
+    static Call(hook, args*) {
+        h := ListWindow.Hooks
+        if !h || !h.Has(hook)
+            return
+        try h[hook](args*)
+        catch as e
+            App.Log("钩子 " hook " 出错：" CleanComError(e.Message) " @" e.Line)
+    }
+
+    /* 同 note-window：菜单回调会被传 3 个参数，回调声明得少会抛
+       "Too many parameters"，所以统一套一层变参箭头。 */
+    static Cb(fn) {
+        return (*) => fn.Call()
+    }
+
+    /* 右键菜单。id=0 表示点在空白处（面板菜单），否则是该条便签的菜单。
+       参数用普通函数包一层再交给 Cb：闭包捕获的是"变量"，直接在 for 循环里
+       建箭头会导致所有项都指向最后一个颜色。 */
+    static ShowMenu(id) {
+        if !ListWindow.Win
+            return
+        if (id) {
+            n := ListWindow.Store ? ListWindow.Store.Get(id) : 0
+            if !n
+                return
+            m := Menu()
+            m.Add("打开", ListWindow.Cb(ListMenuOpen(id)))
+            m.Add()
+            m.Add(n.pinned ? "取消置顶" : "置顶", ListWindow.Cb(ListMenuPin(id, n.pinned ? 0 : 1)))
+            sub := Menu()
+            for cname, hex in NoteWindow.Colors() {
+                sub.Add(NoteWindow.ColorLabel(cname), ListWindow.Cb(ListMenuColor(id, cname)))
+                if (cname = n.color)
+                    sub.Check(NoteWindow.ColorLabel(cname))
+            }
+            m.Add("颜色", sub)
+            m.Add()
+            m.Add("收起这张", ListWindow.Cb(ListMenuHide(id)))
+            m.Add("删除…", ListWindow.Cb(ListMenuDelete(id)))
+            m.Show()
+            return
+        }
+        m := Menu()
+        m.Add("新建便签", ListWindow.Cb(ListMenuNew()))
+        m.Add("刷新列表", ListWindow.Cb(ListMenuRefresh()))
+        m.Add()
+        m.Add("全部显示", ListWindow.Cb(ListMenuShowAll()))
+        m.Add("全部收起", ListWindow.Cb(ListMenuHideAll()))
+        m.Add()
+        m.Add("打开数据目录", ListWindow.Cb(ListMenuDataDir()))
+        m.Show()
     }
 
     ; 页面就绪时先下发外观/交互参数，再推数据
@@ -192,3 +263,51 @@ class ListWindow {
 ; ---- 顶层包装（COM 事件 / SetTimer 用） ----------------------------------
 ListOnMessage(sender, args) => ListWindow.OnMessage(sender, args)
 ListRefill() => ListWindow.Refill()
+
+; ---- 菜单回调 ------------------------------------------------------------
+; 每个函数返回一个"零参闭包"，由 ListWindow.Cb 再包一层变参箭头。
+; 必须经过函数参数转一手：闭包捕获的是变量本身，直接在 for 循环体里写箭头，
+; 所有菜单项会一起指向循环结束时的最后一个值。
+ListMenuTick(id) {
+    return () => ListWindow.ShowMenu(id)
+}
+
+ListMenuOpen(id) {
+    return () => ListWindow.Call("onOpen", id)
+}
+
+ListMenuPin(id, on) {
+    return () => ListWindow.Call("onPin", id, on)
+}
+
+ListMenuColor(id, name) {
+    return () => ListWindow.Call("onColor", id, name)
+}
+
+ListMenuHide(id) {
+    return () => ListWindow.Call("onHide", id)
+}
+
+ListMenuDelete(id) {
+    return () => ListWindow.Call("onDelete", id)
+}
+
+ListMenuNew() {
+    return () => ListWindow.Call("onNew")
+}
+
+ListMenuRefresh() {
+    return () => ListWindow.Push(ListWindow.Query)
+}
+
+ListMenuShowAll() {
+    return () => ListWindow.Call("onShowAll")
+}
+
+ListMenuHideAll() {
+    return () => ListWindow.Call("onHideAll")
+}
+
+ListMenuDataDir() {
+    return () => ListWindow.Call("onDataDir")
+}

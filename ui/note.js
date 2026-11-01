@@ -47,6 +47,7 @@
       switch (msg.type) {
         case 'init': onInit(msg); break;
         case 'color': applyColor(msg.color); break;
+        case 'pin': setPinned(msg.on); break;
         case 'toggle-md': setMode(state.mode === 'md' ? 'rich' : 'md'); break;
         case 'copy-all': copyAll(); break;
         case 'focus': editor.focus(); break;
@@ -182,6 +183,15 @@
   });
   $('btnMenu').addEventListener('click', () => send({ type: 'menu', id: state.id }));
   $('btnClose').addEventListener('click', () => send({ type: 'close', id: state.id }));
+
+  /* 右键菜单用系统原生菜单（由宿主弹），不自己画：便签窗口最小可以缩到
+     180×140，页面内的菜单根本放不下九项，原生菜单才能超出窗口边界。
+     AreDefaultContextMenusEnabled 已经在宿主侧关掉了，所以不会打架。
+     注意别拦输入框的"粘贴"场景：菜单里没有粘贴项，但右键后 Ctrl+V 仍可用。 */
+  document.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    send({ type: 'menu', id: state.id });
+  });
 
   function setPinned(on) {
     state.pinned = on ? 1 : 0;

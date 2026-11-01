@@ -188,7 +188,11 @@ class NoteWindow {
                 case "resize-start":
                     this.StartResize(JsonStr(raw, "edge", "se"))
                 case "menu":
-                    this.ShowMenu()
+                    ; 菜单和确认框都会阻塞线程，所以从消息回调里退出来再弹：
+                    ; COM 回调用户不能长时间占着，否则 WebView2 侧会等着卡住
+                    SetTimer(ObjBindMethod(this, "ShowMenu"), -10)
+                case "delete":
+                    SetTimer(ObjBindMethod(this, "ConfirmDelete"), -10)
                 case "open-external":
                     App.OpenExternal(JsonStr(raw, "url"))
                 case "toast":
@@ -241,16 +245,29 @@ class NoteWindow {
 
     DoPin(on) {
         NoteWindow.Store.SetPinned(this.id, on)
-        this.note.pinned := on
+        this.ApplyPin(on)
+    }
+
+    /* 只改外观不写库：列表窗口改置顶/颜色时走这里，避免同一个值写两遍。
+       （DoPin/DoColor 是"本地发起的改动"，自己写库；Apply* 是"外部通知"） */
+    ApplyPin(on) {
+        this.note.pinned := on ? 1 : 0
         try this.gui.Opt((on ? "+" : "-") "AlwaysOnTop")
         if (on)
             try WinSetAlwaysOnTop(1, "ahk_id " this.gui.Hwnd)
+        this.Send('{"type":"pin","on":' (on ? "true" : "false") '}')
     }
 
     DoColor(color) {
         if !NoteWindow.IsColor(color)
             return
         NoteWindow.Store.SetColor(this.id, color)
+        this.ApplyColor(color)
+    }
+
+    ApplyColor(color) {
+        if !NoteWindow.IsColor(color)
+            return
         this.note.color := color
         if !NoteWindow.Ctx.appearance.transparent
             this.gui.BackColor := NoteWindow.ColorHex(color)
@@ -357,29 +374,53 @@ class NoteWindow {
         }
     }
 
-    ; ---- 右键菜单 -----------------------------------------------------------
+    ; ---- 菜单 ---------------------------------------------------------------
+
+    /* ★ 菜单项回调会被传 3 个参数（项目名、序号、菜单对象），而 AHK 在调用点
+       会做严格的参数个数检查：回调声明得比这少就直接抛
+           "Too many parameters passed to function."
+       表现到界面上就是"菜单弹得出来，但点哪项都没反应"——错误还被记在了
+       m.Show() 那一行，看着像是 Show 出问题。所以所有回调统一套 MB 包一层，
+       用变参箭头把多出来的参数吃掉。新增菜单项时别忘了。 */
+    static MB(fn) {
+        return (*) => fn.Call()
+    }
 
     ShowMenu() {
-        ; 注意：AHK v2 的箭头函数没有 this 绑定，回调一律用 ObjBindMethod
+        isMd := (this.note.mode = "md")
         m := Menu()
         m.Add("新建便签", (*) => App.NewNote())
+        m.Add("便签列表…", (*) => App.ShowList())
         m.Add()
-        m.Add(this.note.pinned ? "取消置顶" : "置顶", ObjBindMethod(this, "TogglePin"))
+        m.Add(this.note.pinned ? "取消置顶" : "置顶"
+            , NoteWindow.MB(ObjBindMethod(this, "TogglePin")))
         sub := Menu()
         for name, hex in NoteWindow.Colors() {
-            sub.Add(NoteWindow.ColorLabel(name), ObjBindMethod(this, "DoColor", name))
+            sub.Add(NoteWindow.ColorLabel(name)
+                , NoteWindow.MB(ObjBindMethod(this, "DoColor", name)))
             if (name = this.note.color)
                 sub.Check(NoteWindow.ColorLabel(name))
         }
         m.Add("颜色", sub)
         m.Add()
-        m.Add("切换 Markdown 源码", ObjBindMethod(this, "SendType", "toggle-md"))
-        m.Add("复制全文", ObjBindMethod(this, "SendType", "copy-all"))
+        m.Add(isMd ? "切换到富文本编辑" : "切换 Markdown 源码"
+            , NoteWindow.MB(ObjBindMethod(this, "SendType", "toggle-md")))
+        m.Add("复制全文", NoteWindow.MB(ObjBindMethod(this, "CopyAll")))
         m.Add()
-        m.Add("便签列表…", (*) => App.ShowList())
-        m.Add("收起这张", ObjBindMethod(this, "Hide"))
-        m.Add("删除这张…", ObjBindMethod(this, "ConfirmDelete"))
+        m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
+        m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
         m.Show()
+    }
+
+    /* 复制走 AHK 剪贴板而不是页面里的 navigator.clipboard：菜单点击时页面已经
+       没有用户手势了，clipboard API 会被拒。n.body_* 是防抖保存后的最新副本。 */
+    CopyAll() {
+        n := this.note
+        text := (n.mode = "md") ? n.body_md : n.body_text
+        if (text = "")
+            text := (n.body_text != "") ? n.body_text : n.body_md
+        A_Clipboard := text
+        App.Toast(text = "" ? "这张便签还是空的" : "已复制全文")
     }
 
     ConfirmDelete() {

@@ -169,6 +169,15 @@
 
   $('btnNew').addEventListener('click', () => send({ type: 'new' }));
   $('btnClose').addEventListener('click', () => send({ type: 'close' }));
+  $('btnMenu').addEventListener('click', () => send({ type: 'menu', id: 0 }));
+
+  /* 右键：点在条目上出该条目的菜单，点空白/头部出面板菜单（id=0）。
+     菜单本体由宿主用系统原生菜单弹出。 */
+  document.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const row = e.target.closest('.item');
+    send({ type: 'menu', id: row ? +row.dataset.id : 0 });
+  });
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {

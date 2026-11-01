@@ -109,6 +109,11 @@ class App {
         if App.HasArg("--list")
             App.ShowList()
 
+        if App.HasArg("--selftest-showall")
+            SetTimer(SelfTestShowAll, -2500)
+        if App.HasArg("--selftest-menu")
+            SetTimer(SelfTestMenu, -2500)
+
         ; 8) 几何变化巡检：拖动/缩放结束后把位置写回库
         SetTimer(NoteGeoTick, 800)
     }
@@ -194,14 +199,22 @@ class App {
             return 0
         }
         w := NoteWindow(n)
+        /* 重新建窗也要把 hidden 复位：否则"全部显示"只是把窗口画出来，
+           库里还标着已收起，下次启动又不见了（自检抓到过）。 */
+        if (n.hidden)
+            App.Store.SetHidden(id, 0)
         w.ToFront()
         return w
     }
 
+    /* 全部显示：必须遍历 All() 而不是 Visible()。
+       Visible() 只返回 hidden=0 的，而"收起的便签"恰好都是 hidden=1 —— 之前
+       用 Visible() 的结果就是：一收起就再也点不出来，点菜单毫无反应。 */
     static ShowAll() {
-        for n in App.Store.Visible()
+        for n in App.Store.All()
             App.OpenNote(n.id)
         App.RefreshTray()
+        App.RefreshList()
     }
 
     static HideAll() {
@@ -228,6 +241,11 @@ class App {
             "onOpen", NoteOpen,
             "onDelete", NoteDelete,
             "onHide", NoteHide,
+            "onPin", NotePin,
+            "onColor", NoteColor,
+            "onShowAll", NoteShowAll,
+            "onHideAll", NoteHideAll,
+            "onDataDir", NoteDataDir,
             "onClose", NoteListClosed)
         ListWindow.Open()
     }
@@ -244,6 +262,32 @@ class App {
     static HideNote(id) {
         if NoteWindow.All.Has(id)
             NoteWindow.All[id].Hide()
+    }
+
+    /* 列表窗口发起的改动：先写库，再让开着的那张便签同步外观
+       （Apply* 只管外观，不做持久化 —— 持久化由这里负责，避免写两遍）。 */
+    static SetPin(id, on) {
+        App.Store.SetPinned(id, on)
+        if NoteWindow.All.Has(id)
+            NoteWindow.All[id].ApplyPin(on)
+        App.RefreshTray()
+    }
+
+    static SetColor(id, color) {
+        if !NoteWindow.IsColor(color)
+            return
+        App.Store.SetColor(id, color)
+        if NoteWindow.All.Has(id)
+            NoteWindow.All[id].ApplyColor(color)
+    }
+
+    static RefreshList() {
+        if ListWindow.IsOpen()
+            ListWindow.Push(ListWindow.Query)
+    }
+
+    static OpenDataDir() {
+        try Run(App.DataDir)
     }
 
     ; ========================================================================
@@ -481,12 +525,59 @@ class App {
     }
 }
 
+/* 自检：收起全部 -> 全部显示，确认窗口真的回到屏幕上。
+   只在带 --selftest-showall 启动时跑一次，用于回归"全部显示没反应"这个 bug。 */
+SelfTestShowAll() {
+    total := 0
+    for id, w in NoteWindow.All
+        total++
+    App.Log("SELFTEST 起始：窗口对象 " total " 个")
+    for id, w in NoteWindow.All.Clone()
+        w.Hide()
+    hid := 0
+    shown := 0
+    for id, w in NoteWindow.All
+        hid += DllCall("IsWindowVisible", "ptr", w.gui.Hwnd) ? 1 : 0
+    hiddenRows := 0
+    for n in App.Store.All()
+        hiddenRows += n.hidden ? 1 : 0
+    App.Log("SELFTEST 收起后：仍可见窗口 " hid " 个，库里 hidden=1 共 " hiddenRows " 张")
+    App.ShowAll()
+    Sleep 1500
+    for id, w in NoteWindow.All
+        shown += DllCall("IsWindowVisible", "ptr", w.gui.Hwnd) ? 1 : 0
+    hiddenLeft := 0
+    for n in App.Store.All()
+        hiddenLeft += n.hidden ? 1 : 0
+    App.Log("SELFTEST 全部显示后：可见窗口 " shown " 个，库里仍未显示的 " hiddenLeft " 张")
+    App.Log("SELFTEST 结论：" (shown = App.Store.Count() && hiddenLeft = 0 ? "通过" : "未通过"))
+    ExitApp 0
+}
+
+/* 自检：把第一张便签的菜单弹出来（会阻塞到菜单关闭）。
+   只用来确认"从 WebView2 消息回调退出来之后仍能正常弹原生菜单"，
+   日志里没有"未处理异常"就算过。 */
+SelfTestMenu() {
+    for id, w in NoteWindow.All {
+        App.Log("SELFTEST 准备弹菜单（便签 " id "）")
+        w.ShowMenu()
+        App.Log("SELFTEST 菜单已关闭，没有抛异常")
+        break
+    }
+    ExitApp 0
+}
+
 ; ---- 顶层包装：SetTimer / OnError 传类静态方法引用会踩坑，统一走这里 ----------
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
 NoteOpen(id) => App.OpenNote(id)
 NoteDelete(id) => App.DeleteNote(id)
 NoteHide(id) => App.HideNote(id)
+NotePin(id, on) => App.SetPin(id, on)
+NoteColor(id, color) => App.SetColor(id, color)
+NoteShowAll() => App.ShowAll()
+NoteHideAll() => App.HideAll()
+NoteDataDir() => App.OpenDataDir()
 NoteListClosed() => App.RefreshTray()
 NoteGeoTick() => App.GeoTick()
 
