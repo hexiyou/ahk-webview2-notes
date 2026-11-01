@@ -48,7 +48,7 @@ NoteWindow.Ctx := {
     dllPath: A_ScriptDir "\..\lib\WebView2Loader.dll",
     dataDir: dataDir "\webview2",
     devtools: 0,
-    appearance: { transparent: 1, fontSize: 15, drag: "native" }
+    appearance: { transparent: 1, fontSize: 15, drag: "manual" }
 }
 
 id := st.Create(Map("x", 240, "y", 180, "w", 340, "h", 320))
@@ -57,6 +57,13 @@ App.Log("=== e2e 开始，id=" id)
 
 w := NoteWindow(n)
 Sleep 1800
+
+; 回归：分层窗口必须设过 alpha=255。漏掉这一句，窗口就是"看得见、点不到"
+; ——鼠标消息按 alpha=0 直接穿透到下面的窗口（真机上就是这么翻车的）。
+aBuf := Buffer(4, 0)
+aRes := DllCall("GetLayeredWindowAttributes", "ptr", w.gui.Hwnd, "ptr", 0, "ptr", aBuf, "ptr", 0, "int")
+aVal := NumGet(aBuf, 0, "uchar")
+Check("分层窗口已设 alpha=255", aRes && aVal = 255, aVal)
 
 ; ---- 1. 页面就绪 ----
 Check("页面就绪", w.ready = 1)

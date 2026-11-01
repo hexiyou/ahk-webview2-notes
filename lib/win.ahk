@@ -9,8 +9,8 @@
 ;              圆角/阴影/底色全部由页面 CSS 用 rgba 画。桌面能透出来。
 ;    普通路线：不加扩展样式，WebView2 背景 alpha=255，Win11 交给 DWM 做圆角。
 ;
-;  坑：一旦调了 SetLayeredWindowAttributes(LWA_ALPHA)，整窗会被"整片淡化"，
-;      透明像素会变黑；所以透明路线**绝不**碰 LWA。
+;  坑（踩过，见 MakeTransparent 的注释）：分层窗口只加样式不设 alpha 时，
+;      alpha 是 0 → 画面看得见、鼠标全穿透。必须补 SetLayeredWindowAttributes(255)。
 ; ============================================================================
 
 class Win {
@@ -37,8 +37,30 @@ class Win {
     ; 透明路线必须的两个样式：
     ;   WS_EX_LAYERED (0x80000)            分层窗口，才能有 per-pixel alpha
     ;   WS_EX_NOREDIRECTIONBITMAP (0x200000) 不分配重定向表面，避免黑底
+    ;
+    ; ★★ 血的教训：分层窗口的**命中测试按整窗 alpha 判定**。只加样式、不调
+    ;    SetLayeredWindowAttributes 时，窗口的 alpha 一直是 0，于是：
+    ;       画面看得见（WebView2 的合成层由 DWM 直接合成，不走窗口表面）
+    ;       鼠标却全部穿透（alpha=0 的区域让鼠标消息过给下面的窗口）
+    ;    表现就是「便签显示正常，一点就点到别的软件上」。设成 255 只是把命中
+    ;    测试恢复成正常，**不会**让窗口变不透明 —— 窗口自己没有表面可画，
+    ;    画面仍然完全来自 WebView2。
+    ;    实测（tools\probe-hit.ahk）：不设 alpha 时 WindowFromPoint 返回 0，
+    ;    设成 255 后返回窗口句柄。
     static MakeTransparent(hwnd) {
-        try Win.AddExStyle(hwnd, 0x00080000 | 0x00200000)
+        Win.AddExStyle(hwnd, 0x00080000 | 0x00200000)
+        Win.SetAlpha(hwnd, 255)
+    }
+
+    ; LWA_ALPHA = 0x2；alpha 只影响命中测试，画面由 WebView2 提供
+    static SetAlpha(hwnd, alpha) {
+        return DllCall("SetLayeredWindowAttributes", "ptr", hwnd
+            , "uint", 0, "uchar", alpha, "uint", 2, "int")
+    }
+
+    ; 当前鼠标在屏幕坐标处会被哪个窗口接住（0 = 没人接，即穿透）
+    static WindowAt(x, y) {
+        return DllCall("WindowFromPoint", "int64", (y << 32) | (x & 0xFFFFFFFF), "ptr")
     }
 
     ; Win11 的 DWM 圆角（DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2）

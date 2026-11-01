@@ -29,8 +29,15 @@ html, body {
   justify-content: space-between;
   height: 46px;
   padding: 0 16px;
-  -webkit-app-region: drag;
+  /* 默认不给 app-region：改由 list.js 发 drag-start、宿主进系统移动循环。
+     原生 app-region 在带 WS_THICKFRAME 的窗口上拖不动（真机验证：能点、拖不动）。 */
+  -webkit-app-region: no-drag;
+  user-select: none;
+  cursor: default;
 }
+
+/* config.ini 里 drag=native 时换回系统原生拖动 */
+body[data-drag="native"] .head { -webkit-app-region: drag; }
 
 .title {
   font-size: 15px;

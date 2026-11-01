@@ -18,6 +18,14 @@
 
 ## 快速开始
 
+### 开发调试：用 run.bat（推荐先走这条）
+
+双击 `run.bat`。它用项目自带的运行时跑 `note.ahk` 脚本版，并且：
+
+- 语法错误、运行时错误会**直接打在窗口里**（编译版看不到，一崩就没了）
+- 改完 `.ahk` 或 `ui\` 下的文件，关掉窗口重开就生效，不用重新编译
+- 注意：关掉那个命令行窗口 = 退出程序
+
 ### 直接运行（需要 AutoHotkey v2）
 
 1. 装 [AutoHotkey v2](https://www.autohotkey.com/)（或者直接用项目自带的 `runtime\AutoHotkey64.exe`）
@@ -34,6 +42,10 @@ runtime\AutoHotkey64.exe note.ahk
 
 `dist\QuickNote.exe` 是编译好的单文件程序（仍需机器上有 WebView2 Runtime，Win10 1803+ 基本都自带）。
 双击即用，不用装 AutoHotkey。
+
+**编译版出问题时的排查顺序**：先看 `dist\crash.log`（启动失败会写在这里，同时弹框提示），
+再看数据目录里的 `app.log`（托盘菜单「打开日志」可以直接打开）。还是定位不了，就用
+`run.bat` 跑同一份脚本——同样的错误在命令行里会带文件行号。
 
 ---
 
@@ -134,14 +146,15 @@ devtools=0           ; 1=允许 F12 打开开发者工具
 
 ## 透明外观：如果显示不正常
 
-半透明是这套技术栈里唯一有不确定性的地方。如果便签窗口出现**黑底、全黑、或者内容看不见**：
+透明这条路有两个必踩的坑，都已经修好并写进了「实现笔记」，这里只说怎么回退：
+
+如果便签窗口出现**黑底、全黑、或者内容看不见**：
 
 1. 托盘菜单 → 取消「透明外观」（或者把 `config.ini` 里 `transparent` 改成 `0`）
 2. 程序会重建成不透明实色窗口，其他功能不受影响
 
-原因写在下面「实现笔记」里：WebView2 的背景透明依赖 `DefaultBackgroundColor` 的 alpha=0
-加上分层窗口，个别显卡驱动/远程桌面会话下合成会有差异。默认按透明启动，是因为它在绝大多数
-本机环境下效果更好。
+默认按透明启动，是因为它在绝大多数本机环境下效果更好。个别显卡驱动 / 远程桌面会话下
+WebView2 的合成确实会有差异，这时才需要退回不透明。
 
 ---
 
@@ -163,6 +176,7 @@ devtools=0           ; 1=允许 F12 打开开发者工具
 ```
 wv2-notes/
 ├─ note.ahk              主程序：单实例、托盘、热键、启动装载
+├─ run.bat               ★ 开发调试入口：脚本模式跑，错误直接打在窗口里
 ├─ lib/
 │  ├─ sqlite.ahk         SQLite 封装（优先用系统 winsqlite3.dll）
 │  ├─ store.ahk          数据访问层（表结构、CRUD、搜索）
@@ -194,7 +208,7 @@ node tests/md.test.js
 # 单窗口冒烟（真 WebView2，会写 data\_win.log）
 runtime\AutoHotkey64.exe tools\probe-window.ahk
 
-# 端到端：输入→防抖→落库→切模式→改色→几何→重开（26 项断言）
+# 端到端：输入→防抖→落库→切模式→改色→几何→重开（27 项断言）
 runtime\AutoHotkey64.exe tools\e2e.ahk
 
 # 列表面板：渲染/搜索/回调（11 项断言）
@@ -202,6 +216,19 @@ runtime\AutoHotkey64.exe tools\probe-list.ahk
 
 # 数据层
 runtime\AutoHotkey64.exe tools\probe-store.ahk
+
+# 分层窗口命中测试：不改代码也能确认"看得见的东西点得到"（10 项断言）
+runtime\AutoHotkey64.exe tools\probe-hit.ahk
+
+# 对**正在运行**的程序做交互验收：真鼠标拖顶栏 + 点按钮改库（需先启动 run.bat）
+runtime\AutoHotkey64.exe tools\probe-live.ahk
+runtime\AutoHotkey64.exe tools\probe-click.ahk
+
+# 半透明是否真的生效：压在黑底/桌面各量一次像素
+runtime\AutoHotkey64.exe tools\probe-blend.ahk
+
+# 抓桌面截图（PowerShell 的 Add-Type 被安全策略挡了，这里用 GDI 自己写 BMP）
+runtime\AutoHotkey64.exe tools\shot-screen.ahk out.bmp 0 0 800 600
 ```
 
 测试脚本都用 `data\_*.db`，不会碰你的真实便签。
@@ -254,3 +281,40 @@ pwsh -File tools/make-icon.ps1
 
 11. **单 UI 线程是共享的。** 任何一个窗口的消息回调抛未捕获异常，AHK 会弹模态框，
     所有便签一起冻住。所以消息分发整个包在 `try` 里，异常只写日志（`OnError` 返回 1 不弹框）。
+
+12. **★ 分层窗口只加 `WS_EX_LAYERED` 不设 alpha，鼠标会全部穿透。**
+    `WS_EX_LAYERED` 的命中测试按整窗 alpha 判定，而新建窗口的 alpha 默认是 **0**。
+    只加样式不调 `SetLayeredWindowAttributes` 的后果是：
+    **画面看得见**（WebView2 的合成层由 DWM 直接合成，不走窗口表面）、**鼠标全穿过去**
+    ——点击落到桌面上，表现为"便签显示正常，一点就点到别的软件上"。
+    修法就一句 `SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)`：255 只是把命中
+    测试恢复成正常，**不会**让窗口变不透明（窗口自己没有表面可画，画面仍全来自 WebView2）。
+    验证脚本 `tools\probe-hit.ahk`：不设 alpha 时 `WindowFromPoint` 返回 0，设完返回窗口句柄。
+
+13. **★ `html` 元素千万别涂底色。** 透明模式下 `body.transparent { background: transparent }`
+    只清掉 `body`，如果 `html` 也被 `html, body { background: rgb(...) }` 涂了一层，
+    那层铺满整个视口，把窗口盖成一块实色——卡片永远"不透明"、窗口是硬边矩形。
+    表现很迷惑：样式看着没错，`DefaultBackgroundColor` 也设了 0，就是不透。
+    量像素才能发现：卡片中心恒等于便签色本身（`0xFFF3B0`），换背景不变。
+    正确写法：`html { background: transparent }`，兜底底色只给 `body`。
+
+14. **`-webkit-app-region: drag` + `IsNonClientRegionSupportEnabled` 在真机上拖不动。**
+    WebView2 Runtime 是 156（够新），但列表窗口（`-Caption +Resize`）和透明便签窗口
+    （分层）都实测"能点、拖不走"。所以拖动改成自己做：
+    顶栏给 `app-region: no-drag`（否则浏览器把 `mousedown` 吃掉，页面收不到），
+    页面按下发 `drag-start` → AHK 侧 `ReleaseCapture()` + `PostMessage(WM_NCLBUTTONDOWN,
+    HTCAPTION)` 进系统移动循环。这条路任何窗口样式都能用，还白送贴边吸附。
+    `config.ini` 里 `drag=native` 仍保留原生路线，只作排查用。
+
+15. **编译版出错是"静默死亡"。** 没有控制台、没有 AHK 的语法错误框，双击后一闪就没了。
+    三条兜底：启动阶段 `try App.Main()` 包住（失败弹框 + 写 `crash.log`）；
+    `note.ahk --check` 只做加载检查、立刻退出，`tools\build.ps1` 编译前先跑一遍；
+    打包后自动冒烟测试（便携模式启动 exe，6 秒后查进程存活 + 日志里有 `Boot 返回` + 没有
+    `crash.log`）。日常调试用 `run.bat` 跑脚本版。
+
+16. **测试时的两个环境坑（不是程序问题）**
+    - Git Bash 会把 `/ErrorStdOut` 当成路径改写成 `C:\Program Files\Git\ErrorStdOut`，
+      脚本莫名其妙以退出码 2 结束。加 `MSYS2_ARG_CONV_EXCL='*'`。
+    - 本机沙箱里 `SendInput` 发**键盘**会卡死（鼠标 `Click`/`MouseMove` 正常），
+      所以自动化验收别用键盘注入改数据，要验证点击就点一个会改库的按钮
+      （`tools\probe-click.ahk` 点顶栏置顶按钮，看 `pinned` 有没有翻转）。

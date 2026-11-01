@@ -36,10 +36,14 @@ html, body {
   font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
   font-size: var(--fs);
   color: var(--fg);
-  background: rgb(var(--note-rgb));      /* 不透明路线的兜底 */
   -webkit-font-smoothing: antialiased;
   cursor: default;
 }
+
+/* ★ html 千万不要涂底色：它铺满整个视口，透明模式下会把窗口盖成一块实色，
+   表现为"卡片永远不透明、窗口是硬边矩形"。兜底色只给 body。 */
+html { background: transparent; }
+body { background: rgb(var(--note-rgb)); }   /* 不透明路线的兜底 */
 
 /* 透明路线：整页透明，底色挪到 .note 上 */
 body.transparent { background: transparent; }
@@ -72,9 +76,14 @@ body.transparent .note {
   align-items: center;
   height: 32px;
   padding: 0 4px 0 10px;
-  -webkit-app-region: drag;
+  /* 默认不给 app-region：改由 note.js 发 drag-start、宿主进系统移动循环。
+     透明模式下窗口是 WS_EX_LAYERED，原生 app-region 拖不动（真机验证）。 */
+  -webkit-app-region: no-drag;
   user-select: none;
 }
+
+/* config.ini 里 drag=native 时换回系统原生拖动 */
+body[data-drag="native"] .bar { -webkit-app-region: drag; }
 
 .drag-zone { flex: 1 1 auto; height: 100%; }
 

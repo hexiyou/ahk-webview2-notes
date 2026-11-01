@@ -95,6 +95,19 @@ class ListWindow {
             try ListWindow.Hooks["onClose"]()
     }
 
+    ; 拖动：页面顶栏按下后调这里，把控制权交给系统的移动循环。
+    ; 之所以不用 -webkit-app-region: drag + IsNonClientRegionSupportEnabled 那条路，
+    ; 是因为在带 WS_THICKFRAME 的窗口上它不生效（用户在真机上验证过：能点、拖不动）。
+    static StartMove() {
+        if !ListWindow.Win
+            return
+        try {
+            hwnd := ListWindow.Win.gui.Hwnd
+            DllCall("ReleaseCapture")
+            PostMessage(0x00A1, 2, 0, , "ahk_id " hwnd)   ; WM_NCLBUTTONDOWN / HTCAPTION
+        }
+    }
+
     static OnMessage(sender, args) {
         raw := ""
         try raw := args.WebMessageAsJson
@@ -104,6 +117,7 @@ class ListWindow {
         try {
             switch JsonStr(raw, "type") {
                 case "ready":
+                    ListWindow.PushInit()
                     ListWindow.Push()
                 case "refresh":
                     ListWindow.Push(ListWindow.Query)
@@ -126,12 +140,24 @@ class ListWindow {
                     if h && h.Has("onHide")
                         h["onHide"](JsonNum(raw, "id"))
                     ListWindow.Push(ListWindow.Query)
+                case "drag-start":
+                    ListWindow.StartMove()
                 case "close":
                     ListWindow.Close()
             }
         } catch as e {
             App.Log("list 消息出错：" CleanComError(e.Message) " @" e.Line)
         }
+    }
+
+    ; 页面就绪时先下发外观/交互参数，再推数据
+    static PushInit() {
+        if !ListWindow.Win
+            return
+        appr := ListWindow.Ctx ? ListWindow.Ctx.appearance : 0
+        drag := (appr && appr.drag) ? appr.drag : "manual"
+        json := '{"type":"init","drag":' JsonQuote(drag) '}'
+        try ListWindow.Win.wv.PostWebMessageAsJson(json)
     }
 
     ; 推一批便签到页面；term 为空推全部（含已收起）

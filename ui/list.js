@@ -27,6 +27,10 @@
     bridge.addEventListener('message', ev => {
       const msg = ev.data;
       if (msg && msg.type === 'notes') render(msg.items || []);
+      else if (msg && msg.type === 'init') {
+        // manual = 顶栏交给 JS 拖；native = 还给 -webkit-app-region（见 list.css）
+        document.body.dataset.drag = msg.drag === 'native' ? 'native' : 'manual';
+      }
       else if (msg && msg.type === 'refresh') send({ type: 'search', q: query });
     });
   }
@@ -145,6 +149,17 @@
   }
 
   /* ---- 交互 ------------------------------------------------------------- */
+
+  /* ---- 顶栏拖动 --------------------------------------------------------- */
+
+  /* 原生 -webkit-app-region 在带 WS_THICKFRAME 的窗口上不生效（真机验证过：
+     能点、拖不动），所以顶栏按下后交给宿主进系统移动循环。 */
+  $('head').addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button, input, .actions')) return;
+    e.preventDefault();
+    send({ type: 'drag-start' });
+  });
 
   qEl.addEventListener('input', () => {
     query = qEl.value.trim();

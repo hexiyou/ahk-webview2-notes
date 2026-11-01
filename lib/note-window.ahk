@@ -56,6 +56,12 @@ class NoteWindow {
         g.Show("x" geo.x " y" geo.y " w" geo.w " h" geo.h " NoActivate")
         this.lastGeo := geo.x "," geo.y "," geo.w "," geo.h
 
+        ; ★ 分层窗口必须在窗口存在之后补 alpha=255，否则整窗 alpha=0，
+        ;   鼠标消息会直接穿透到下面的窗口（表现：看得见、点不到）。
+        ;   详见 lib\win.ahk 的 MakeTransparent 注释。
+        if (appr.transparent)
+            Win.SetAlpha(g.Hwnd, 255)
+
         if (!appr.transparent)
             Win.RoundCorners(g.Hwnd, true)
 
@@ -177,8 +183,8 @@ class NoteWindow {
                 case "list":
                     App.ShowList()
                 case "drag-start":
-                    if (NoteWindow.Ctx.appearance.drag = "manual")
-                        this.StartMove()
+                    ; 页面在 manual 模式下把顶栏的 app-region 让出来，改由这里拖
+                    this.StartMove()
                 case "resize-start":
                     this.StartResize(JsonStr(raw, "edge", "se"))
                 case "menu":

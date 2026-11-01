@@ -61,6 +61,8 @@
     state.app = msg.app || state.app;
 
     document.body.classList.toggle('transparent', !!state.app.transparent);
+    // 拖动模式：manual = 顶栏让出来自己拖（默认）；native = 还给 -webkit-app-region
+    document.body.dataset.drag = state.app.drag === 'native' ? 'native' : 'manual';
     if (state.app.fontSize) document.documentElement.style.setProperty('--fs', state.app.fontSize + 'px');
     applyColor(n.color);
     setPinned(n.pinned);
@@ -155,6 +157,20 @@
     updateCount();
     saveNow();
   }
+
+  /* ---- 顶栏拖动 --------------------------------------------------------- */
+
+  /* 默认手动拖：便签是 WS_EX_LAYERED 的透明窗口，-webkit-app-region: drag 那条
+     原生路线在真机上拖不动（能点、不跟手）。这里按下就通知宿主进系统移动循环。
+     drag=native 时 CSS 会把顶栏交还给 app-region，浏览器会吃掉 mousedown，
+     下面这段自然不会被触发，两种模式互不干扰。 */
+  document.querySelector('.bar').addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button')) return;
+    if (state.mode === 'md' && e.target === source) return;
+    e.preventDefault();
+    send({ type: 'drag-start', id: state.id });
+  });
 
   /* ---- 工具栏 ----------------------------------------------------------- */
 

@@ -60,6 +60,7 @@ class App {
         App.DataDir := App.ResolveDataDir()
         App.EnsureConfig()
         App.LogPath := App.DataDir "\app.log"
+        App.MigrateCfg()
         if !DirExist(App.DataDir "\webview2")
             DirCreate App.DataDir "\webview2"
         App.Ctx := {
@@ -70,7 +71,7 @@ class App {
             appearance: {
                 transparent: App.Cfg("appearance", "transparent", 1),
                 fontSize: App.Cfg("appearance", "fontSize", 15),
-                drag: App.Cfg("appearance", "drag", "native")
+                drag: App.Cfg("appearance", "drag", "manual")
             }
         }
 
@@ -260,6 +261,7 @@ class App {
         t.Add("透明外观", (*) => App.ToggleAppearance())
         t.Add()
         t.Add("数据目录…", (*) => Run(App.DataDir))
+        t.Add("打开日志", (*) => App.OpenLog())
         t.Add("重新加载全部", (*) => App.ReloadAll())
         t.Add()
         t.Add("退出", (*) => App.Quit())
@@ -352,6 +354,19 @@ class App {
             Run url
     }
 
+    ; 直接开日志：编译版出问题时至少有个能看的地方
+    static OpenLog() {
+        if FileExist(App.LogPath) {
+            try Run(App.LogPath)
+            return
+        }
+        if FileExist(A_ScriptDir "\crash.log") {
+            try Run(A_ScriptDir "\crash.log")
+            return
+        }
+        App.Toast("还没有日志")
+    }
+
     static Log(msg) {
         if (App.LogPath = "")
             return
@@ -386,6 +401,22 @@ class App {
         App.Log("退出：reason=" reason " code=" code)
     }
 
+    /* 早期版本默认 drag=native，但真机上原生 app-region 根本拖不动
+       （能点、不跟手，用户在实机验证过），所以老配置里残留的 native 一律
+       改回 manual。只改一次，用 dragVersion 打标，之后尊重用户手写。 */
+    static MigrateCfg() {
+        path := App.DataDir "\config.ini"
+        if !FileExist(path)
+            return
+        if (IniRead(path, "appearance", "dragVersion", "0") = "1")
+            return
+        try {
+            IniWrite "manual", path, "appearance", "drag"
+            IniWrite "1", path, "appearance", "dragVersion"
+            App.Log("配置迁移：drag 改为 manual（原生拖动在实机上不生效）")
+        }
+    }
+
     ; 首次运行写一份带注释的配置，省得用户去翻 README
     static EnsureConfig() {
         if !DirExist(App.DataDir)
@@ -402,8 +433,12 @@ class App {
         text .= "transparent=1`r`n"
         text .= "; 正文字号（像素）`r`n"
         text .= "fontSize=15`r`n"
-        text .= "; 拖动方式：native = 交给系统移动循环（默认、最顺）；manual = AHK 自己跟鼠标`r`n"
-        text .= "drag=native`r`n`r`n"
+        text .= "; 拖动方式：manual = 顶栏按下后交给系统移动循环（默认，实机可靠）`r`n"
+        text .= "; native = 用 -webkit-app-region 让 WebView2 自己处理；实测在透明`r`n"
+        text .= ";          窗口和带边框的窗口上都拖不动，只留作排查用`r`n"
+        text .= "drag=manual`r`n"
+        text .= "; 内部标记：用于判断老配置要不要迁移，别删`r`n"
+        text .= "dragVersion=1`r`n`r`n"
         text .= "[window]`r`n"
         text .= "; 新建便签的默认尺寸`r`n"
         text .= "width=300`r`n"
@@ -456,7 +491,10 @@ NoteListClosed() => App.RefreshTray()
 NoteGeoTick() => App.GeoTick()
 
 NoteOnError(e, mode) {
-    App.Log("未处理异常 [" e.What "] " CleanComError(e.Message) " @" e.Line)
+    msg := "未处理异常 [" e.What "] " CleanComError(e.Message) " @" e.Line
+    App.Log(msg)
+    if (App.LogPath = "")           ; 还没走到设日志那步，直接落程序目录
+        NoteCrash(msg)
     return 1        ; 1 = 已处理，不弹模态框（弹了整个 UI 线程就冻住了）
 }
 
@@ -464,4 +502,30 @@ NoteOnExit(reason, code) {
     App.Log("退出：reason=" reason " code=" code)
 }
 
-App.Main()
+/* 编译版没有控制台，也没有 AHK 的语法错误框，出问题必须自己留痕。
+   crash.log 固定写在程序目录，和数据目录是否可写无关。 */
+NoteCrash(msg) {
+    line := FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss") "  " msg "`n"
+    try FileAppend line, A_ScriptDir "\crash.log", "UTF-8-RAW"
+}
+
+/* 启动阶段包一层：这时还没有窗口和托盘，弹框是安全的，也是编译版唯一
+   能看到错误内容的机会。跑起来之后的异常交给 NoteOnError 静默记日志。 */
+
+/* --check：只做语法/加载检查，立刻退出。打包脚本编译前会先跑一遍，
+   免得把"编出来一启动就退"的 exe 交付出去。 */
+if App.HasArg("--check")
+    ExitApp 0
+
+try App.Main()
+catch as e {
+    msg := "启动失败：" CleanComError(e.Message)
+    if e.HasProp("File")
+        msg .= "`n位置：" e.File " 第 " e.Line " 行"
+    NoteCrash(msg)
+    tip := ""
+    if A_IsCompiled
+        tip := "`n`n编译版看不到详细报错，可以改用项目根目录的 run.bat 跑脚本版定位。"
+    MsgBox(msg tip "`n`n崩溃日志：" A_ScriptDir "\crash.log", "QuickNote 启动失败", "Icon!")
+    ExitApp 1
+}
