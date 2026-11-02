@@ -328,6 +328,9 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
   transition: opacity .15s;
 }
 .note:hover .grip { opacity: .55; }
+/* 最大化时不留手柄：整块屏都是窗口，"还能再拉大"是个假承诺，
+   而且拖它只会把最大化状态破坏掉（页面侧也一并拦了 resize-start）。 */
+body[data-max="1"] .grip { display: none; }
 .grip::after {
   content: "";
   position: absolute;

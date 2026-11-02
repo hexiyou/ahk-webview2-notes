@@ -149,6 +149,8 @@ class App {
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
             SetTimer(SelfTestShotCode, -2500)
+        if App.HasArg("--shot-max")
+            SetTimer(SelfTestShotMax, -2500)
 
         ; 8) 几何变化巡检：拖动/缩放结束后把位置写回库
         SetTimer(NoteGeoTick, 800)
@@ -1256,6 +1258,51 @@ SelfTestShotCode() {
     SelfTestDone()
 }
 
+/* 拍一张"最大化之后"的样子：确认铺满工作区、右下角手柄消失、
+   正文排版在大窗口下没有散架。 */
+SelfTestShotMax() {
+    w := 0
+    try {
+        w := App.NewNote()
+        Loop 40 {
+            if w && w.ready
+                break
+            Sleep 100
+        }
+        RichEval(w, "
+        ( LTrim Join
+        (function(){
+          const ed = document.getElementById('editor');
+          ed.innerHTML = '<h2>大段输入</h2>'
+            + '<p>双击便签标题栏就铺满整块屏幕，再双击还原。'
+            + '长文、图片、代码块想一口气写的时候用得上。</p>'
+            + '<pre><code class=""language-python"">'
+            + 'def fib(n):'
+            + '\n' + '    return n if n < 2 else fib(n-1) + fib(n-2)'
+            + '</code></pre>'
+            + '<p>空行上再敲一次回车（或 Ctrl+Enter / Esc / 末尾按 ↓）就能跳出代码块。</p>';
+          window.CodeHL.paintAll(ed, { force: true });
+          /* 直接写 innerHTML 不会触发 input，占位提示「写点什么…」会留在上面；
+             补一发 input 让空白判断和字数统计跟上（截图才干净）。 */
+          ed.dispatchEvent(new Event('input', { bubbles: true }));
+          return 1;
+        })()
+        )")
+        Sleep 400
+        w.SetMax(1)
+        Sleep 800
+        ok := ShotNote(w, A_ScriptDir "\assets\shot-max.png")
+        App.Log("SHOT max=" ok)
+        w.SetMax(0)
+        Sleep 200
+        if w
+            App.DeleteNote(w.id)
+    } catch as e {
+        App.Log("SHOT max 失败：" CleanComError(e.Message) " @" e.Line)
+    }
+    SelfTestDone()
+}
+
 /* 自检：设置面板。分两段验：
    1) 窗口能开、页面能收到 init（用 ExecuteScript 读回表单值来证明）
    2) ApplySettings 真能落盘并生效，且非法热键会被拦下、原配置不被动坏 */
@@ -1733,7 +1780,7 @@ SelfTestEditRun() {
     RichSay("Ctrl+S 后状态栏出现『已保存』", InStr(st, "已保存") > 0, st)
     RichSay("Ctrl+S 的回执是强调样式（status.ok）", InStr(st, "ok") > 0, st)
 
-    ; ---- 3. 代码块：三条出路 ------------------------------------------------
+    ; ---- 3. 代码块：能敲多行，也要出得去 ------------------------------------
     RichEval(w, "__e.put('<p>x</p>');__e.all();1")
     Sleep 150
     RichEval(w, "__e.click('codeblock');1")
@@ -1741,11 +1788,19 @@ SelfTestEditRun() {
     hasPre := JStr(RichEval(w, "__e.pre()?1:0"))
     RichSay("工具条能插入代码块", hasPre = "1", hasPre)
 
+    /* ★ 本轮的正题：块末尾敲回车必须还能接着敲下一行。
+       判据是页面**没有** preventDefault（返回 0）—— 这一下交还给浏览器去插换行。
+       上一版这里返回 1（把光标弹出块外），多行代码根本敲不进去。 */
     RichEval(w, "(function(){var p=__e.pre();p.textContent='const a = 1;';__e.caretEnd(p);return 1})()")
     Sleep 120
-    /* 光标在末尾按回车：应该"跳出去"，而不是在块里再加一行。
-       判据 = 焦点落到了 <pre> 后面的兄弟节点里。 */
-    RichEval(w, "__e.key('Enter',{})")
+    firstEnter := JStr(RichEval(w, "__e.key('Enter',{})"))
+    RichSay("块末尾回车仍留在块里（能继续敲下一行）", firstEnter = "0", "prevented=" firstEnter)
+
+    /* 再敲一次（此时最后一行已经是空行）才是出口。直接把 DOM 做成"敲过一次
+       回车"的样子：末尾多一个 <br>，和 Chromium 里的实况一致。 */
+    RichEval(w, "(function(){var p=__e.pre();p.innerHTML='const a = 1;<br>';__e.caretEnd(p);return 1})()")
+    Sleep 120
+    secondEnter := JStr(RichEval(w, "__e.key('Enter',{})"))
     Sleep 250
     rawOut := RichEval(w, "
     ( LTrim Join
@@ -1757,26 +1812,82 @@ SelfTestEditRun() {
     })()
     )")
     out := JStr(rawOut)
-    RichSay("代码块末尾回车 → 光标跳出去", out = "1", out)
+    RichSay("空行上再敲回车 → 光标跳出去", secondEnter = "1" && out = "1"
+        , "prevented=" secondEnter " out=" out)
+    trimmed := JStr(RichEval(w, "(function(){return CodeHL.textOf(__e.pre())})()"))
+    RichSay("跳出去时把末尾空行削掉", trimmed = "const a = 1;", "[" trimmed "]")
 
     /* 块里还有内容时按回车不能跳（那是在加行） */
     RichEval(w, "(function(){var p=__e.pre();p.textContent='ab';__e.caretAt(p,1);return 1})()")
     Sleep 100
     mid := JStr(RichEval(w, "__e.key('Enter',{})"))
-    RichSay("代码中间回车仍留在块里（不误跳）", mid = "0", mid)
+    RichSay("代码中间回车仍留在块里（不误跳）", mid = "0", "prevented=" mid)
 
-    /* Shift+Enter 随时能跳出来 */
+    /* Shift+Enter 是"块内换行"，不是出口 —— 误触一次就把正在写的行扔出块外，
+       比没有出口更气人（上一版就是这么设计的，用户敲回车被弹出去）。 */
     RichEval(w, "(function(){var p=__e.pre();p.textContent='a';__e.caretEnd(p);return 1})()")
     Sleep 100
     sh := JStr(RichEval(w, "__e.key('Enter',{shift:true})"))
-    Sleep 250
-    rawOut2 := RichEval(w, "
+    Sleep 200
+    rawSh := RichEval(w, "
     ( LTrim Join
-    (function(){ var p=__e.pre(); var next=p.nextElementSibling;
-      return (next && __e.caretIn(next)) ? '1' : '0'; })()
+    (function(){ var p=__e.pre(); return __e.caretIn(p) ? '1' : '0'; })()
     )")
-    out2 := JStr(rawOut2)
-    RichSay("Shift+Enter 直接跳出代码块", out2 = "1", out2)
+    shIn := JStr(rawSh)
+    RichSay("Shift+Enter 留在块里（块内换行，不再当出口）", sh = "0" && shIn = "1"
+        , "prevented=" sh " inpre=" shIn)
+
+    /* Ctrl+Enter：明确出口 */
+    ctrlEnter := JStr(RichEval(w, "__e.key('Enter',{ctrl:true})"))
+    Sleep 250
+    rawCtrl := RichEval(w, "
+    ( LTrim Join
+    (function(){ var p=__e.pre(); var n=p.nextElementSibling;
+      return (n && __e.caretIn(n)) ? '1' : '0'; })()
+    )")
+    ctrlOut := JStr(rawCtrl)
+    RichSay("Ctrl+Enter 直接跳出代码块", ctrlEnter = "1" && ctrlOut = "1"
+        , "prevented=" ctrlEnter " out=" ctrlOut)
+
+    /* Esc：也得出得去（以前 Esc 只清选区，光标还锁在块里） */
+    RichEval(w, "(function(){var p=__e.pre();p.textContent='b';__e.caretEnd(p);return 1})()")
+    Sleep 100
+    escKey := JStr(RichEval(w, "__e.key('Escape',{})"))
+    Sleep 250
+    escOut := JStr(RichEval(w, "
+    ( LTrim Join
+    (function(){ var p=__e.pre(); var n=p.nextElementSibling;
+      return (n && __e.caretIn(n)) ? '1' : '0'; })()
+    )"))
+    RichSay("Esc 也能从代码块里出来", escKey = "1" && escOut = "1", "out=" escOut)
+
+    /* 光标在块尾按 ↓：顺着视线往下走 */
+    RichEval(w, "(function(){var p=__e.pre();p.textContent='c';__e.caretEnd(p);return 1})()")
+    Sleep 100
+    downKey := JStr(RichEval(w, "__e.key('ArrowDown',{})"))
+    Sleep 250
+    downOut := JStr(RichEval(w, "
+    ( LTrim Join
+    (function(){ var p=__e.pre(); var n=p.nextElementSibling;
+      return (n && __e.caretIn(n)) ? '1' : '0'; })()
+    )"))
+    RichSay("块尾按 ↓ 出来", downKey = "1" && downOut = "1", "out=" downOut)
+
+    /* Tab 在块里是缩进，不是"把焦点跳走" */
+    RichEval(w, "__e.ed().focus();(function(){var p=__e.pre();p.textContent='x';__e.caretEnd(p);return 1})()")
+    Sleep 100
+    tabKey := JStr(RichEval(w, "__e.key('Tab',{})"))
+    Sleep 200
+    /* 断言里把空格换成 ·：JStr 会 Trim，尾随空格读回来就没了（踩过一次） */
+    tabText := JStr(RichEval(w, "(function(){return CodeHL.textOf(__e.pre()).replace(/ /g,'·')})()"))
+    RichSay("Tab 在块里被页面接管（不跳焦点）", tabKey = "1", "prevented=" tabKey)
+    RichSay("Tab 真的插了两个空格", tabText = "x··", "[" tabText "]")
+
+    /* Shift+Tab 把刚缩进的两格退回去（只动光标前面的空格） */
+    shTab := JStr(RichEval(w, "__e.key('Tab',{shift:true})"))
+    Sleep 200
+    shTabText := JStr(RichEval(w, "(function(){return CodeHL.textOf(__e.pre()).replace(/ /g,'·')})()"))
+    RichSay("Shift+Tab 退掉两格缩进", shTabText = "x", "prevented=" shTab " [" shTabText "]")
 
     /* 空的代码块按退格，整块拆掉 */
     RichEval(w, "(function(){var p=__e.pre();p.textContent='';__e.caretEnd(p);return 1})()")
@@ -1835,6 +1946,60 @@ SelfTestEditRun() {
     w.Send('{"type":"cmd","name":"undo"}')
     Sleep 250
     RichSay("编辑菜单「撤销」不报错", 1)
+
+    ; ---- 6. 双击标题栏最大化 / 还原 -----------------------------------------
+    /* 页面侧：同一个位置 380ms 内的第二下必须发 toggle-max，而不是又发一次
+       drag-start。把 postMessage 拦下来看它到底发了什么 ——
+       千万别让它真发出去：drag-start 会让宿主进系统移动循环，自检就卡死在这儿。 */
+    rawSeq := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const br = window.chrome.webview;
+      const orig = br.postMessage.bind(br);
+      const log = [];
+      br.postMessage = function(m){ log.push(m && m.type); };
+      const bar = document.querySelector('.bar');
+      const fire = function(){
+        bar.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true
+          , button: 0, screenX: 500, screenY: 300 }));
+      };
+      fire(); fire();
+      br.postMessage = orig;
+      return log.join(',');
+    })()
+    )")
+    seq := JStr(rawSeq)
+    RichSay("双击标题栏 = 一次 drag-start + 一次 toggle-max", seq = "drag-start,toggle-max", seq)
+
+    /* 宿主侧：铺满工作区 → 还原。先把手头的几何写进库，才好验"最大化期间不动库" */
+    w.SaveGeometryNow()
+    Sleep 200
+    r0 := Win.Rect(w.gui.Hwnd)
+    g0 := NoteWindow.Store.Get(id)
+    w.SetMax(1)
+    Sleep 350
+    r1 := Win.Rect(w.gui.Hwnd)
+    wa := Win.WorkAreaOf(w.gui.Hwnd)
+    RichSay("最大化铺满工作区（扣掉任务栏）"
+        , Abs(r1.w - wa.w) <= 2 && Abs(r1.h - wa.h) <= 2
+        , r1.w "x" r1.h " vs 工作区 " wa.w "x" wa.h)
+    RichSay("最大化后贴在工作区左上角"
+        , Abs(r1.x - wa.l) <= 2 && Abs(r1.y - wa.t) <= 2, r1.x "," r1.y)
+    g1 := NoteWindow.Store.Get(id)
+    RichSay("最大化不写库（下次开机不会满屏）"
+        , g1.w = g0.w && g1.h = g0.h, g0.w "x" g0.h " -> " g1.w "x" g1.h)
+    pageMax := JStr(RichEval(w, "document.body.dataset.max || '-'"))
+    RichSay("页面收到 max=true（拖动与手柄自动让位）", pageMax = "1", pageMax)
+
+    w.SetMax(0)
+    Sleep 350
+    r2 := Win.Rect(w.gui.Hwnd)
+    RichSay("再次双击还原回原尺寸"
+        , Abs(r2.w - r0.w) <= 2 && Abs(r2.h - r0.h) <= 2
+        && Abs(r2.x - r0.x) <= 2 && Abs(r2.y - r0.y) <= 2
+        , r0.w "x" r0.h " @" r0.x "," r0.y " -> " r2.w "x" r2.h " @" r2.x "," r2.y)
+    pageMax2 := JStr(RichEval(w, "document.body.dataset.max || '-'"))
+    RichSay("还原后页面状态复位", pageMax2 = "0", pageMax2)
 
     App.Log("SELFTEST EDIT 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
         . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")

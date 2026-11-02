@@ -54,6 +54,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 能力 | 说明 |
 |---|---|
 | 多张便签 | 每张是独立顶层窗口，可单独拖动、缩放、置顶、收起、删除 |
+| 最大化 | 双击标题栏（或右键菜单「最大化窗口」）铺满当前显示器的工作区，再双击还原 |
 | 无边框 + 圆角 | 拖动用系统移动循环（`-webkit-app-region`），缩放用右下角手柄 |
 | 半透明 | 卡片能透出桌面（窗口用 `WS_EX_LAYERED`+`WS_EX_NOREDIRECTIONBITMAP`，页面用 rgba 自绘） |
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
@@ -84,7 +85,10 @@ runtime\AutoHotkey64.exe note.ahk
 | `Ctrl+M` | 切换 Markdown 源码 |
 | `Ctrl+滚轮` | 放大 / 缩小正文字号（也可用右键菜单的「字号」） |
 | `Ctrl+V` | 粘贴截图 / 图片（拖文件到便签里同样可以） |
-| `Shift+Enter` / `Ctrl+Enter` | 光标在代码块里时，直接跳出代码块 |
+| 双击标题栏 | 最大化 / 还原窗口（铺满当前显示器的工作区，不遮任务栏） |
+| `Enter`（代码块里） | 正常换行，可以一行一行往下敲 |
+| `Enter`（空行上）/ `Ctrl+Enter` / `↓`（块尾） | 跳出代码块 |
+| `Tab` / `Shift+Tab`（代码块里） | 缩进 / 退掉两格 |
 | `Esc` | 代码块里 = 跳出；看图时 = 关闭大图；其它情况 = 失焦并保存 |
 
 全局：
@@ -150,6 +154,7 @@ runtime\AutoHotkey64.exe note.ahk
 新建便签
 便签列表…
 ────────────
+最大化窗口 / 还原窗口大小   双击标题栏（菜单项会跟着状态变）
 置顶 / 取消置顶
 颜色  ›        黄 / 粉 / 蓝 / 绿 / 紫 / 灰（当前色打勾）
 ────────────
@@ -351,7 +356,8 @@ runtime\AutoHotkey64.exe note.ahk --selftest-rich
 # 程序级自检：粘贴链路 / 图片限高与看大图 / 右上角 X 只收起不删除
 runtime\AutoHotkey64.exe note.ahk --selftest-note
 
-# 程序级自检：大图粘贴(1.9MB base64) / Ctrl+S 回执 / 代码块出路 / 代码着色 / 编辑菜单命令
+# 程序级自检：大图粘贴(1.9MB base64) / Ctrl+S 回执 / 代码块多行输入与出路 /
+#              代码着色 / 编辑菜单命令 / 双击标题栏最大化与还原
 runtime\AutoHotkey64.exe note.ahk --selftest-edit
 
 # 程序级自检：四种导出格式（TXT / MD / HTML / RTF）
@@ -365,6 +371,9 @@ runtime\AutoHotkey64.exe note.ahk --shot-settings
 
 # 给 README 生成"带代码着色"的便签截图（写到 assets\shot-code.png）
 runtime\AutoHotkey64.exe note.ahk --shot-code
+
+# 给 README 生成"最大化之后"的截图（写到 assets\shot-max.png）
+runtime\AutoHotkey64.exe note.ahk --shot-max
 
 # 数据层
 runtime\AutoHotkey64.exe tools\probe-store.ahk
@@ -643,25 +652,60 @@ pwsh -File tools/make-icon.ps1
       把 `<br>` 折成 `\n` —— 直接用 `textContent` 会把两行粘成一行，
       导出的 Markdown 就毁了。
 
-41. **代码块"出不来"的三条出路。** `<pre>` 里按回车只会一直加空行，块后面要是没有
-    别的段落，鼠标点下面也没处落。现在：空行回车 / `Shift+Enter` / `Ctrl+Enter` /
-    末尾按 `↓` 都能跳出去，空块按退格直接拆掉；每次插入代码块后还会自动在末尾补一个
-    空段落（`ensureTrailingBlock`，h2/列表/引用/分割线之后同理）。
+41. **代码块的"出得去"和"进得来"是两件事，别用同一条判据。** 第一版只看"光标后面
+    到块尾全是空白"就跳出去 —— 可块末尾正常敲回车想加第二行时，光标后面本来就是空的，
+    于是**一按回车就被弹出块外，多行代码根本敲不进去**（用户实测）。现在只认
+    "当前这一行本来就是空行"：也就是说**连按两次回车**才出去，按一次永远是换行。
+    判定不能用字符偏移比长度：`textOf()` 把 `<br>` 折成了 `\n`，而 `caretOffset()`
+    只数文本节点，两者天生差几个字符。要问 DOM —— 从光标到块尾这一段 range 取字符串
+    （`caretAtEnd()`）+ 块正文是否以换行结尾（`lastLineEmpty()`）。
+    `Shift+Enter` 特意**不是**出口：那是"块内换行"的肌肉记忆，误触一次等于把正在写的
+    行扔出块外，比没有出口更气人。现在的出口是：空行回车 / `Ctrl+Enter` / `Esc` /
+    块尾 `↓` / 空块退格；`Tab`·`Shift+Tab` 在块里是缩进（不然按 Tab 会把焦点跳走）。
+    每次插入代码块后还会自动在末尾补一个空段落（`ensureTrailingBlock`，
+    h2/列表/引用/分割线之后同理）。
 
-42. **原生菜单点下去，页面已经没有"用户手势"了。** 所以编辑菜单里的复制/剪切不能
+42. **`execCommand` 认的是"当前选区"，文档没焦点时它连选区一起丢。** 所以 `Tab` 缩进
+    这条路上先 `grabCaret()` 存一份 range，插完核对正文长度，没变就 `putCaret()` +
+    自己 `insertNode`。自检里（窗口后台、没有用户手势）永远走兜底那条；
+    真人打字时走 execCommand，好处是 Ctrl+Z 能一路退回去。
+
+43. **原生菜单点下去，页面已经没有"用户手势"了。** 所以编辑菜单里的复制/剪切不能
     用 `navigator.clipboard`（会被拒），而是把选中的文字发给宿主，由 AHK 写
     `A_Clipboard`；粘贴则反过来 —— `document.execCommand('paste')` 在 Chromium 里
     永远返回 false（只给扩展放行），`navigator.clipboard.read()` 又要手势，
     只能让宿主在菜单关掉之后补按一次真实的 `Ctrl+V`。
 
-43. **代码语言有两张表，必须同步。** 宿主 `NoteWindow.CodeLangs()` 只负责画菜单，
+44. **代码语言有两张表，必须同步。** 宿主 `NoteWindow.CodeLangs()` 只负责画菜单，
     真干活的是 `ui\code-hl.js` 里的 `LANGS`（调 highlight.js）。
     对不上就会出现"选了 Python 没反应"。`probe-menu` 会把两张表逐项比对，
     顺手也把"宿主发得出的每条 `cmd` 页面都能接住"一起验了 —— 这类跨文件约定
     最容易在改名时悄悄坏掉。
 
-44. **vendor 的 highlight.js 是本地文件，不走 CDN。** `ui\vendor\highlight.min.js`
+45. **vendor 的 highlight.js 是本地文件，不走 CDN。** `ui\vendor\highlight.min.js`
     （11.9.0，BSD-3-Clause，121KB，含常用语言）和 `ui\vendor\highlight-github.css`。
     单机便签断网是常态，引 CDN 等于功能随时消失。导出 HTML 的色板也是直接读这份
     CSS 内联进去（`Export.HljsCss()`，读不到就退回内置的紧凑色板），
     两边共用一份，颜色不会慢慢跑偏。
+
+46. **双击标题栏不能靠 `dblclick` 事件。** 便签顶栏的拖动是"页面按下 → 宿主补发
+    `WM_NCLBUTTONDOWN` → 系统进模态移动循环"，按下那一瞬间鼠标就被系统接管了，
+    第二下的 `click` / `dblclick` 派不派发到页面不由我们说了算。
+    所以页面自己数点击：同一屏幕坐标（±6px）、380ms 内的第二下就当双击，
+    并且**这一下不再发 `drag-start`** —— 否则第二次按下又去拽窗口，"放大"变成"挪一下"。
+    用 `screenX/screenY` 而不是 `clientX/Y`：第一下如果让窗口挪动了一两个像素，
+    客户区坐标会变，屏幕坐标不会。宿主侧再兜一层：最大化之后 `StartMove` /
+    `StartResize` 直接不理，页面也不再发这两个消息（`state.maxed`），
+    CSS 里 `body[data-max="1"] .grip` 顺手把手柄藏了。
+
+47. **最大化不是 `WS_MAXIMIZE`，是"搬到工作区"。** 这窗口是 `-Caption` 无边框的，
+    真走系统最大化会按旧边框算法吃掉客户区，125%/150% 缩放下还会露边。直接
+    `WinMove` 到当前显示器的工作区（`Win.WorkAreaOf`，按 `MonitorFromWindow` 取，
+    多屏时不会拿错主屏那份），视觉上一样，还原时把原几何搬回去就行。
+    两个坑：
+    - **`SaveGeometryNow` 在最大化期间必须直接 return。** 不然满屏那一份被写进库，
+      下次开机动不动就一张满屏便签。`restGeo` 只放内存。
+    - **旗子要先立再动窗口。** `GeoTick` 每 800ms 巡检"窗口动过没有"，而 AHK 的
+      定时器随时能打断当前线程 —— 先 WinMove 再置 `maximized`，巡检就会趁
+      `SetMax` 还没返回把满屏几何写进库（自检里真踩到了：`300x280 -> 1920x1040`）。
+    收起（`Hide`）时先还原再收：从列表点开一张满屏便签既吓人又挡事。

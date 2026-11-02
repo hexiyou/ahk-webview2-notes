@@ -94,6 +94,27 @@ class Win {
         return { l: l, t: t, r: r, b: b, w: r - l, h: b - t }
     }
 
+    /* 某个窗口所在那块显示器的工作区（多屏时不能用主屏那份）。
+       用 GetMonitorInfoW 直接问，比"遍历 MonitorGetWorkArea 猜哪块"准：
+       MONITORINFO 的布局是 cbSize(4) + rcMonitor(16) + rcWork(16) + dwFlags(4)，
+       rcWork 从偏移 20 开始。 */
+    static WorkAreaOf(hwnd := 0) {
+        if !hwnd
+            return Win.WorkArea()
+        MONITOR_DEFAULTTONEAREST := 2
+        hmon := DllCall("user32\MonitorFromWindow", "ptr", hwnd
+            , "int", MONITOR_DEFAULTTONEAREST, "ptr")
+        if !hmon
+            return Win.WorkArea()
+        buf := Buffer(40, 0)
+        NumPut("uint", 40, buf, 0)
+        if !DllCall("user32\GetMonitorInfoW", "ptr", hmon, "ptr", buf)
+            return Win.WorkArea()
+        l := NumGet(buf, 20, "int"), t := NumGet(buf, 24, "int")
+        r := NumGet(buf, 28, "int"), b := NumGet(buf, 32, "int")
+        return { l: l, t: t, r: r, b: b, w: r - l, h: b - t }
+    }
+
     ; 判断矩形是否有足够面积落在某块屏幕的工作区内
     static IsOnScreen(x, y, w, h) {
         count := MonitorGetCount()

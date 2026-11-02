@@ -30,6 +30,7 @@
     pinned: 0,
     ready: false,
     dirty: false,
+    maxed: false,          // 窗口被双击标题栏放大了（拖动/拉手柄这时要停手）
     saveTimer: 0,
     app: { transparent: false, fontSize: 15 },
     mdPending: {}          // Markdown 源码模式下，上传中的图片占位符：req -> token
@@ -59,6 +60,7 @@
         case 'focus': editor.focus(); break;
         case 'saved': onSaved(msg); break;
         case 'cmd': runCmd(msg.name, msg); break;
+        case 'max': setMaxed(msg.on); break;
         case 'toast': hint(msg.text || ''); break;
       }
     });
@@ -213,19 +215,46 @@
     saveNow();
   }
 
-  /* ---- 顶栏拖动 --------------------------------------------------------- */
+  /* ---- 顶栏拖动 / 双击最大化 --------------------------------------------- */
 
   /* 默认手动拖：便签是 WS_EX_LAYERED 的透明窗口，-webkit-app-region: drag 那条
      原生路线在真机上拖不动（能点、不跟手）。这里按下就通知宿主进系统移动循环。
      drag=native 时 CSS 会把顶栏交还给 app-region，浏览器会吃掉 mousedown，
-     下面这段自然不会被触发，两种模式互不干扰。 */
-  document.querySelector('.bar').addEventListener('mousedown', e => {
+     下面这段自然不会被触发，两种模式互不干扰。
+
+     双击标题栏 = 最大化 / 还原。为什么不直接监听 dblclick：按下那一刻宿主已经
+     进了系统的窗口移动循环（WM_NCLBUTTONDOWN），鼠标随后被系统接管 ——
+     第二下的 click/dblclick 能不能派发到页面就不由我们说了算了。
+     所以自己数点击：同一个位置、380ms 内的第二下就当双击，且**不**再发
+     drag-start —— 否则第二次按下又会去拽窗口，把"放大"变成"挪一下"。 */
+  const bar = document.querySelector('.bar');
+  let lastDown = 0, lastX = 0, lastY = 0;
+  const DBL_MS = 380, DBL_PX = 6;
+
+  bar.addEventListener('mousedown', e => {
     if (e.button !== 0) return;
     if (e.target.closest('button')) return;
     if (state.mode === 'md' && e.target === source) return;
     e.preventDefault();
+
+    const now = Date.now();
+    if (now - lastDown < DBL_MS
+      && Math.abs(e.screenX - lastX) < DBL_PX && Math.abs(e.screenY - lastY) < DBL_PX) {
+      lastDown = 0;                       // 这一对用掉了，第三下重新计数
+      send({ type: 'toggle-max', id: state.id });
+      return;
+    }
+    lastDown = now; lastX = e.screenX; lastY = e.screenY;
+    /* 最大化状态下没有"拖动"这回事（拖会把整屏的窗口挪走），双击才能还原。 */
+    if (state.maxed) return;
     send({ type: 'drag-start', id: state.id });
   });
+
+  function setMaxed(on) {
+    state.maxed = !!on;
+    document.body.dataset.max = state.maxed ? '1' : '0';
+    hint(state.maxed ? '已铺满屏幕 · 双击标题栏还原' : '窗口已还原');
+  }
 
   /* ---- 工具栏 ----------------------------------------------------------- */
 
@@ -664,10 +693,37 @@
   }
 
   /* 把 <pre> 的正文换掉（只用于"退出代码块时削掉末尾空行"这一处，
-     调用前光标已经要离开了，所以不用担心位置）。 */
+     调用前光标已经要离开了，所以不用担心位置）。
+     有 <code> 就写进 <code>：直接写 pre.textContent 会把 <code> 一起冲掉，
+     导出的 HTML 里就少一层结构（也没了 language-x）。 */
   function setPreText(pre, text) {
-    pre.textContent = text;
+    const code = pre.firstElementChild && pre.firstElementChild.tagName === 'CODE'
+      ? pre.firstElementChild : null;
+    if (code) code.textContent = text;
+    else pre.textContent = text;
     CodeHL.paint(pre);
+  }
+
+  /* 光标是不是停在块的最末尾（它后面再没有可见字符）。
+     不能拿字符偏移比 text.length —— textOf() 把 <br> 折成了 \n，而
+     caretOffset() 只数文本节点，两者天生差几个字符。这里直接问 DOM：
+     从光标到块尾的这一段 range 取字符串，全是空白就算"在末尾"。 */
+  function caretAtEnd(pre) {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    if (!pre.contains(r.startContainer)) return false;
+    const probe = document.createRange();
+    probe.setStart(r.startContainer, r.startOffset);
+    probe.setEnd(pre, pre.childNodes.length);
+    return probe.toString().replace(/[\s\u200b]/g, '') === '';
+  }
+
+  /* 最后一行是不是空的。判据是 <pre> 的正文以换行结尾 —— 用户刚敲出来的那个
+     空行正好长这样（Chromium 里是末尾多一个 <br>，textOf 折成 \n）。 */
+  function lastLineEmpty(text) {
+    const nl = text.lastIndexOf('\n');
+    return nl >= 0 && text.slice(nl + 1) === '';
   }
 
   /* 退出代码块：在后面补一个空段落，把光标放进去。 */
@@ -695,9 +751,18 @@
   }
 
   /* 代码块里的按键。
-     用户的原始问题：插了代码块之后光标再也出不来 —— 因为在 <pre> 里按回车
-     只会不停加空行，而块后面如果没别的段落，鼠标点下面也没地方落。
-     四条出路：空行回车 / Shift+Enter / Ctrl+Enter / 光标在末尾按 ↓。 */
+     ★ 这里翻过一次车，留个记录：
+       第一版为了"能从代码块里出来"，只看"光标后面到块尾全是空白"就跳出去。
+       可是在块末尾正常敲回车想加第二行时，光标后面本来就是空的 —— 于是
+       一按回车就被弹出块外，多行代码根本敲不进去（用户实测）。
+       现在只认"当前这一行本来就是空行"：也就是**连按两次回车**才出去，
+       和绝大多数笔记软件的代码块手感一致；只按一次永远是正常换行。
+
+     显式出口（不用背也行，菜单/提示里都会写）：
+       Ctrl+Enter（Alt/Cmd 也行）、Esc、光标在末尾按 ↓、空代码块直接回车、
+       空代码块按退格整块拆掉。
+     Shift+Enter 特意**不是**出口：那是"块内换行"的肌肉记忆，误触一次就等于
+     把正在写的行扔出块外，比没有出口更气人。 */
   function handleCodeKeys(e) {
     if (!richOn()) return false;
     const sel = window.getSelection();
@@ -706,25 +771,47 @@
     if (!pre) return false;
 
     const text = CodeHL.textOf(pre);
-    const pos = CodeHL.caretOffset(pre);
-    const at = pos ? pos.start : text.length;
 
-    if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey)) {
-      e.preventDefault();
-      return exitCodeBlock(pre);
-    }
     if (e.key === 'Enter') {
-      // 光标后面（到块尾）全是空白 → 认为用户在"最后一行空行"上又敲了回车
-      const tail = text.slice(at);
-      if (/^\s*$/.test(tail)) {
+      if (e.ctrlKey || e.altKey || e.metaKey) {
         e.preventDefault();
         return exitCodeBlock(pre);
       }
-      return false;                       // 代码中间回车照常加行
+      /* 空块：回车就出去（刚插进来又不想要了，很自然的一下） */
+      if (text === '') {
+        e.preventDefault();
+        return exitCodeBlock(pre);
+      }
+      /* 空行上再敲一次回车 → 出去（= 双击回车） */
+      if (caretAtEnd(pre) && lastLineEmpty(text)) {
+        e.preventDefault();
+        return exitCodeBlock(pre);
+      }
+      return false;                     // 其余情况交给浏览器换行
     }
-    if (e.key === 'ArrowDown' && !e.shiftKey && at >= text.length) {
+    if (e.key === 'Escape' && !e.shiftKey) {
       e.preventDefault();
       return exitCodeBlock(pre);
+    }
+    if (e.key === 'ArrowDown' && !e.shiftKey && caretAtEnd(pre)) {
+      e.preventDefault();
+      return exitCodeBlock(pre);
+    }
+    /* Tab 在块里应该是缩进，不是"把焦点跳走"。 */
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (e.shiftKey) { unindent(); return true; }
+      const before = CodeHL.textOf(pre);
+      const caret = grabCaret();
+      document.execCommand('insertText', false, '  ');
+      /* execCommand 认的是"当前选区"，而文档没有焦点时它会连选区一起丢掉。
+         所以先记一份，插不进去就自己塞（自检里就是这条兜底在起作用）。 */
+      if (CodeHL.textOf(pre) === before) {
+        putCaret(caret);
+        insertRaw('  ');
+      }
+      scheduleSave();
+      return true;
     }
     if (e.key === 'Backspace' && text.trim() === '') {
       // 空的代码块：退格直接把它拆掉，变回普通段落
@@ -741,6 +828,63 @@
       return true;
     }
     return false;
+  }
+
+  /* 直接往光标处塞文字。execCommand 比它多一条"能撤销"，但要求文档有焦点，
+     窗口在后台时静默失败 —— 所以两条路都留着。 */
+  function insertRaw(text) {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return false;
+    const r = sel.getRangeAt(0);
+    r.deleteContents();
+    const node = document.createTextNode(text);
+    r.insertNode(node);
+    const after = document.createRange();
+    after.setStart(node, text.length);
+    after.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(after);
+    return true;
+  }
+
+  /* 存/还原光标。execCommand 在文档没有焦点时会把选区抹掉，
+     到时候连"往哪儿插"都不知道了，先留一份。 */
+  function grabCaret() {
+    const sel = window.getSelection();
+    return (sel && sel.rangeCount) ? sel.getRangeAt(0).cloneRange() : null;
+  }
+
+  function putCaret(r) {
+    if (!r) return false;
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    return true;
+  }
+
+  /* Shift+Tab：把光标所在行开头的两格缩进去掉。
+     只削光标前面的空格，不动别处 —— 块里可能还有别的行，改多了反而乱。 */
+  function unindent() {
+    const sel = window.getSelection();
+    if (!sel.rangeCount) return;
+    const r = sel.getRangeAt(0);
+    const n = r.startContainer;
+    if (n.nodeType !== 3) return;
+    const v = n.nodeValue, off = r.startOffset;
+    let del = 0;
+    while (del < 2 && off - del - 1 >= 0 && v[off - del - 1] === ' ') del++;
+    if (!del) return;
+    const rr = document.createRange();
+    rr.setStart(n, off - del);
+    rr.setEnd(n, off);
+    const backup = rr.cloneRange();
+    sel.removeAllRanges();
+    sel.addRange(rr);
+    document.execCommand('delete', false, null);
+    if (n.nodeValue === v) {              // 一个字符都没删掉 → 自己删
+      putCaret(backup);
+      backup.deleteContents();
+    }
   }
 
   /* 插入代码块：先给选区套 formatBlock，再保证它后面有落脚点，
@@ -765,7 +909,7 @@
     }
     ensureTrailingBlock();
     scheduleSave();
-    hint('代码块 · Shift+Enter 或空行回车可跳出');
+    hint('代码块 · 连按两次回车 或 Ctrl+Enter 可跳出');
   }
 
   function setCodeLang(lang) {
@@ -931,6 +1075,7 @@
 
   $('grip').addEventListener('mousedown', e => {
     e.preventDefault();
+    if (state.maxed) return;            // 已经占满整块屏，拉手柄只会让它变小，别理
     send({ type: 'resize-start', id: state.id, edge: 'se' });
   });
 

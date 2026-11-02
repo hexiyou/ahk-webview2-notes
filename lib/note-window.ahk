@@ -31,6 +31,11 @@ class NoteWindow {
     dragging := false
     resizing := 0
     lastGeo := ""
+    /* 双击标题栏放大。maximized 只是"当前是不是铺满状态"，restGeo 记着放大前
+       的几何 —— 两者都只在内存里，不进数据库：重启后回到原来的大小，
+       否则下次开机会一张满屏便签糊在桌面上。 */
+    maximized := false
+    restGeo := ""
     /* 右键菜单的两套。zone 由页面按落点决定：正文里弹"编辑菜单"，
        其它地方弹"便签菜单"。inpre/lang 只在正文落在代码块里时才有值。 */
     menuZone := "note"
@@ -197,6 +202,9 @@ class NoteWindow {
                 case "drag-start":
                     ; 页面在 manual 模式下把顶栏的 app-region 让出来，改由这里拖
                     this.StartMove()
+                case "toggle-max":
+                    ; 双击标题栏（或菜单「最大化窗口」）：铺满 / 还原
+                    SetTimer(ObjBindMethod(this, "ToggleMax"), -10)
                 case "resize-start":
                     this.StartResize(JsonStr(raw, "edge", "se"))
                 case "menu":
@@ -320,6 +328,10 @@ class NoteWindow {
     ; ---- 显隐 ---------------------------------------------------------------
 
     Hide() {
+        /* 收起的要是原尺寸的那一张：下次从列表里点开，跳出来一张满屏便签
+           既吓人又挡事。 */
+        if this.maximized
+            this.SetMax(0)
         this.SaveGeometryNow()
         try this.gui.Hide()
         NoteWindow.Store.SetHidden(this.id, 1)
@@ -343,6 +355,10 @@ class NoteWindow {
     SaveGeometryNow() {
         if !this.gui
             return
+        /* 最大化时不写库：存下去的会是"满屏那一份"，下次开机所有便签都顶满屏。
+           restGeo 才是用户真正的窗口大小。 */
+        if this.maximized
+            return
         r := Win.Rect(this.gui.Hwnd)
         if (r.w <= 0 || r.h <= 0)
             return
@@ -357,13 +373,66 @@ class NoteWindow {
     StartMove() {
         if !this.gui
             return
+        if this.maximized          ; 满屏状态下拖顶栏没有意义，别把整屏窗口挪走
+            return
         DllCall("ReleaseCapture")
         PostMessage(0x00A1, 2, 0, , "ahk_id " this.gui.Hwnd)   ; WM_NCLBUTTONDOWN / HTCAPTION
+    }
+
+    /* ---- 最大化 / 还原 -----------------------------------------------------
+       双击标题栏（或菜单里的那一项）切一下。这里用的是"铺满当前显示器的
+       工作区"而不是真正的 WS_MAXIMIZE 状态：
+         · 这窗口是 -Caption 的无边框窗口，系统最大化会按旧的边框算法吃点客户区，
+           在 125%/150% 缩放下还会露出边；
+         · 真 WS_MAXIMIZE 会让页面收到 resize、圆角/半透明也跟着走样。
+       直接 WinMove 到工作区（已扣掉任务栏，不会盖住开始按钮），
+       视觉上和最大化一样，还原时把原几何搬回去就完事。 */
+    ToggleMax() {
+        this.SetMax(!this.maximized)
+    }
+
+    SetMax(on) {
+        if !this.gui
+            return
+        on := on ? 1 : 0
+        if (on = this.maximized)
+            return
+        if (on) {
+            r := Win.Rect(this.gui.Hwnd)
+            wa := Win.WorkAreaOf(this.gui.Hwnd)
+            this.restGeo := { x: r.x, y: r.y, w: r.w, h: r.h }
+            /* ★ 先立旗子再动窗口：GeoTick 每 800ms 巡检一次"窗口动过没有"，
+               而 AHK 的定时器随时能打断当前线程。旗子立晚了，巡检就会趁
+               WinMove 还没返回把"满屏"那一份写进库 —— 表现是下次开机动不动
+               就一张满屏便签（自检里真踩到了：300x280 -> 1920x1040）。 */
+            this.maximized := 1
+            try WinMove(wa.l, wa.t, wa.w, wa.h, "ahk_id " this.gui.Hwnd)
+        } else {
+            g := IsObject(this.restGeo) ? this.restGeo : Win.Clamp(0, 0, 520, 420)
+            try WinMove(g.x, g.y, g.w, g.h, "ahk_id " this.gui.Hwnd)
+            ; 还原要在搬完窗口之后再落旗，搬的过程中巡检才会继续躲开
+            this.maximized := 0
+            this.restGeo := ""
+        }
+        try this.wvc.Fill()
+        /* 满屏还留着圆角的话，四个角会漏出底色，看着像"没铺满" */
+        if !NoteWindow.Ctx.appearance.transparent
+            try Win.RoundCorners(this.gui.Hwnd, !on)
+        ; 页面要知道状态：最大化时它不再发 drag-start / resize-start，
+        ; 手柄也会淡出去（CSS 里 body[data-max]）
+        this.Send('{"type":"max","on":' (on ? "true" : "false") '}')
+        if !on {
+            ; 还原后把几何写回：万一用户最大化之前挪过窗口，这一笔才是最新的
+            this.lastGeo := ""
+            this.SaveGeometryNow()
+        }
     }
 
     ; 缩放：页面手柄按下后调这里，之后靠 15ms 节拍跟光标
     StartResize(edge) {
         if !this.gui
+            return
+        if this.maximized          ; 满屏时拉手柄只会把状态搞乱
             return
         CoordMode("Mouse", "Screen")
         MouseGetPos(&mx, &my)
@@ -444,6 +513,10 @@ class NoteWindow {
         m.Add("便签列表…", (*) => NoteDeferList())
         m.Add("重命名…", NoteWindow.MB(ObjBindMethod(this, "Rename")))
         m.Add()
+        /* 大段文字/图片的集中输入：先摊开整块屏，省得一边写一边拖窗口。
+           双击标题栏是同一个动作，菜单里也留一份（不用记双击这件事）。 */
+        m.Add(this.maximized ? "还原窗口大小`t双击标题栏" : "最大化窗口`t双击标题栏"
+            , NoteWindow.MB(ObjBindMethod(this, "ToggleMax")))
         m.Add(this.note.pinned ? "取消置顶" : "置顶"
             , NoteWindow.MB(ObjBindMethod(this, "TogglePin")))
         sub := Menu()

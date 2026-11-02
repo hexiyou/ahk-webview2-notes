@@ -238,6 +238,29 @@ Check("宿主语言表覆盖常见语言", langsAhk.Count >= 15, langsAhk.Count 
 Check("列表页有 contextmenu → menu", InStr(listJs, "contextmenu") > 0 && InStr(listJs, "type: 'menu'") > 0)
 Check("便签页处理宿主下发的 pin", InStr(noteJs, "case 'pin'") > 0)
 
+; ---------------------------------------------------------------------------
+; 8. 双击标题栏最大化：三处必须对上
+;     页面发 toggle-max → 宿主收 → SetMax 改窗口 → 回 "max" 给页面。
+;     中间断一环，表现就是"双击没反应"或"放大了但拖不动/停不下来"。
+; ---------------------------------------------------------------------------
+
+Check("宿主有 ToggleMax", NoteWindow.Prototype.HasMethod("ToggleMax"))
+Check("宿主有 SetMax", NoteWindow.Prototype.HasMethod("SetMax"))
+Check("宿主收得到 toggle-max", InStr(srcWin, 'case "toggle-max"') > 0)
+Check("宿主把状态回给页面", InStr(srcWin, '"type":"max"') > 0)
+Check("页面接得住 max 消息", InStr(noteJs, "case 'max'") > 0)
+Check("页面会发 toggle-max", InStr(noteJs, "'toggle-max'") > 0)
+Check("页面自己数双击（不依赖 dblclick 事件）"
+    , InStr(noteJs, "DBL_MS") > 0 && !RegExMatch(noteJs, "addEventListener\(\s*'dblclick'"))
+Check("最大化时页面不再发 drag-start / resize-start"
+    , InStr(noteJs, "if (state.maxed) return;") > 0)
+Check("最大化时不写库（否则开机满屏）"
+    , RegExMatch(srcWin, "SaveGeometryNow\(\)\s*\{[^}]*this\.maximized\s*[\r\n]+\s*return") > 0)
+Check("最大化用当前显示器的工作区", InStr(srcWin, "Win.WorkAreaOf(") > 0)
+Check("Win 有 WorkAreaOf", Win.HasMethod("WorkAreaOf"))
+wa := Win.WorkAreaOf(0)
+Check("WorkAreaOf(0) 退化成主屏工作区", wa.w > 200 && wa.h > 200, wa.w "x" wa.h)
+
 App.Log("=== 结束：PASS " PassN " / FAIL " FailN)
 Sleep 150
 ExitApp FailN ? 1 : 0
