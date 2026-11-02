@@ -192,18 +192,40 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
 .editor pre code { padding: 0; background: none; }
 .editor a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .editor hr { border: 0; border-top: 1px solid var(--line); margin: .6em 0; }
-.editor img { max-width: 100%; border-radius: 6px; }
+.editor img {
+  /* inline-block 而不是 block：大图视觉上照样独占一行，但光标还能点在图片
+     后面接着写（block 之后没有文本节点时，contenteditable 的光标很难落）。 */
+  display: inline-block;
+  max-width: 100%;
+  border-radius: 6px;
+  vertical-align: bottom;
+  margin: .15em 0;
+}
+/* 上传中的占位：等宿主把文件落盘回 URL 再换上真图 */
+.editor img.pending {
+  min-width: 120px;
+  min-height: 76px;
+  background: rgba(0, 0, 0, .05);
+  border: 1px dashed rgba(0, 0, 0, .28);
+}
 
 /* 待办勾选：contenteditable 里不能塞真 input（焦点会被抢走），用 span 模拟 */
 .chk {
   display: inline-grid;
   place-items: center;
+  flex: 0 0 auto;              /* 在 flex 行里不许被挤扁 */
   width: 1.05em;
   height: 1.05em;
+  /* ★ 方框要靠 margin-top 落到首行文字的中线上，不能靠 vertical-align：
+     .task-line 是 flex 容器，vertical-align 对 flex 子项**完全无效**，
+     之前写了 -.12em 其实一直被忽略，于是方框挂在行顶、文字按基线往下坐，
+     看起来就是"勾选框比文字高半行"。
+     行盒高 = line-height 1.62em，方框 1.05em，几何居中偏移 (1.62-1.05)/2 ≈ .285em；
+     汉字在 em 盒里的视觉重心偏下一点，所以再压到 .3em 才和文字重心齐平。 */
+  margin-top: .3em;
   margin-right: .35em;
   border: 1.5px solid rgba(0, 0, 0, .38);
   border-radius: 4px;
-  vertical-align: -.12em;
   cursor: pointer;
   user-select: none;
 }
@@ -276,6 +298,9 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
   position: fixed;
   z-index: 20;
   display: flex;
+  /* 便签可以缩到 180px 宽，按钮多了必须能折行，否则会顶出窗口边界 */
+  flex-wrap: wrap;
+  max-width: calc(100vw - 8px);
   gap: 1px;
   padding: 3px;
   border-radius: 8px;
@@ -295,6 +320,7 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
   cursor: pointer;
 }
 .floatbar button:hover { background: rgba(0, 0, 0, .08); }
+.floatbar button.mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; }
 
 /* ---- 滚动条 ------------------------------------------------------------ */
 

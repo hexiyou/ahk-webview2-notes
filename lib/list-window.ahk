@@ -226,6 +226,7 @@ class ListWindow {
                 return
             m := Menu()
             m.Add("打开", ListWindow.Cb(ListMenuOpen(id)))
+            m.Add("重命名…", ListWindow.Cb(ListMenuRename(id)))
             m.Add()
             m.Add(n.pinned ? "取消置顶" : "置顶", ListWindow.Cb(ListMenuPin(id, n.pinned ? 0 : 1)))
             sub := Menu()
@@ -305,6 +306,10 @@ ListTick(raw, type) {
 
 ListMenuOpen(id) {
     return () => ListWindow.Call("onOpen", id)
+}
+
+ListMenuRename(id) {
+    return () => ListWindow.Call("onRename", id)
 }
 
 ListMenuPin(id, on) {

@@ -27,6 +27,8 @@ class App {
     static NewNote() => 0
     static ShowList() => 0
     static ZoomFont(step) => 0
+    static RenameNote(id) => 0
+    static SaveImage(raw, id) => 0
     static SetFontSize(px) => 0
     static RefreshTray() => 0
     static OpenExternal(u) => 0
@@ -109,7 +111,7 @@ Check("菜单项各记自己的 id/颜色（第二个）", gotB = "22,blue", got
 ; ---------------------------------------------------------------------------
 
 for m in ["ShowMenu", "TogglePin", "DoPin", "ApplyPin", "DoColor", "ApplyColor"
-    , "CopyAll", "Hide", "Show", "ConfirmDelete", "SendType"]
+    , "CopyAll", "Hide", "Show", "ConfirmDelete", "SendType", "Rename"]
     Check("NoteWindow 有方法 " m, NoteWindow.Prototype.HasMethod(m))
 Check("NoteWindow 有静态方法 MB", NoteWindow.HasMethod("MB"))
 

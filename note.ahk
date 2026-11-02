@@ -71,6 +71,7 @@ class App {
             uiDir: A_ScriptDir "\ui",
             dllPath: A_ScriptDir "\lib\WebView2Loader.dll",
             dataDir: App.DataDir "\webview2",
+            imagesDir: App.DataDir "\images",
             devtools: App.Cfg("debug", "devtools", 0),
             appearance: {
                 transparent: App.Cfg("appearance", "transparent", 1),
@@ -124,6 +125,8 @@ class App {
             SetTimer(SelfTestList, -2500)
         if App.HasArg("--selftest-font")
             SetTimer(SelfTestFont, -2500)
+        if App.HasArg("--selftest-rich")
+            SetTimer(SelfTestRich, -2500)
 
         ; 8) 几何变化巡检：拖动/缩放结束后把位置写回库
         SetTimer(NoteGeoTick, 800)
@@ -253,6 +256,7 @@ class App {
             "onOpen", NoteOpen,
             "onDelete", NoteDelete,
             "onHide", NoteHide,
+            "onRename", NoteRename,
             "onPin", NotePin,
             "onColor", NoteColor,
             "onShowAll", NoteShowAll,
@@ -291,6 +295,36 @@ class App {
         App.Store.SetColor(id, color)
         if NoteWindow.All.Has(id)
             NoteWindow.All[id].ApplyColor(color)
+    }
+
+    /* ---- 标题 ---------------------------------------------------------------
+       标题默认是"正文第一行的前 60 字"自动派生的，所以以前根本没有改名字的入口。
+       手动指定后 Store 会把 title_locked 置 1，之后正文怎么变都不再覆盖它；
+       再想交回自动，就把输入框清空。 */
+    static RenameNote(id) {
+        n := App.Store.Get(id)
+        if !n {
+            App.Toast("这张便签已经不在了")
+            return
+        }
+        hintText := n.title_locked ? "留空 = 恢复按正文第一行自动取标题"
+            : "留空 = 保持现在的自动标题"
+        r := InputBox("给这张便签起个名字（列表里就显示这个）`n`n" hintText
+            , "重命名便签", "w420 h170", n.title)
+        if (r.Result = "Cancel")
+            return
+        name := Trim(r.Value)
+        if (name = "") {
+            t := App.Store.ClearTitle(id)
+            App.Toast(t = "" ? "已恢复自动标题" : "已恢复自动标题：" t)
+        } else {
+            App.Store.SetTitle(id, name)
+            App.Toast("标题已改为「" name "」")
+        }
+        if NoteWindow.All.Has(id)
+            NoteWindow.All[id].note := App.Store.Get(id)
+        App.RefreshList()
+        App.RefreshTray()
     }
 
     /* ---- 字号 ---------------------------------------------------------------
@@ -755,6 +789,215 @@ SelfTestFont() {
     SelfTestDone()
 }
 
+/* 自检：富文本工具条 / Markdown 往返 / 图片插入。
+   为什么写在这里而不是另开一个 tools\probe-*.ahk：那套写法要 include 整套库，
+   实测在这个环境里会诡异地在加载期就卡死（连第一行 FileAppend 都不执行），
+   而主程序本身一切正常。直接在真窗口里点真按钮，验的也正是用户实际走的路。
+   测完会把自己新建的那张便签删掉。
+
+   注意这里刻意**没有**用嵌套函数（在 SelfTestRich 里再 def 一个函数）：
+   AHK v2 对嵌套函数的支持有坑，实测触发了一个不弹不报、直接把加载卡死的
+   状态，排查花了很久。统一改成顶层函数，把窗口对象当参数传进来。 */
+SelfTestRich() {
+    /* 包一层 try：自检线程一旦抛异常就会静默死掉，进程留在后台不退
+       （表现是测试命令一直等到超时）。失败也必须走到 SelfTestDone。 */
+    try SelfTestRichRun()
+    catch as e {
+        App.Log("SELFTEST RICH 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST RICH 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestRichRun() {
+    w := App.NewNote()
+    if !w {
+        App.Log("SELFTEST RICH 没能建出便签")
+        SelfTestDone()
+        return
+    }
+    id := w.id
+    Loop 40 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    App.Log("SELFTEST RICH 页面就绪=" (w.ready ? 1 : 0))
+    Global RICH_PASS := 0, RICH_FAIL := 0
+
+    ; 页面里的测试脚手架：切内容 / 全选 / 点工具条按钮 / 取 html、md
+    RichEval(w, "
+    ( LTrim Join
+    window.__t = {
+      ed: () => document.getElementById('editor'),
+      put(h) { this.ed().innerHTML = h; },
+      all() {
+        const r = document.createRange();
+        r.selectNodeContents(this.ed());
+        const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      },
+      click(c) { document.querySelector('[data-cmd=\"' + c + '\"]').click(); },
+      html() { return this.ed().innerHTML; },
+      md() { return window.MD.toMarkdown(this.ed().innerHTML); }
+    };
+    1;
+    )")
+
+    RichStyle(w, "bold", "b", "**abcdef**", "加粗")
+    RichStyle(w, "italic", "i", "*abcdef*", "斜体")
+    RichStyle(w, "strikeThrough", "strike", "~~abcdef~~", "删除线")
+    RichStyle(w, "formatBlock:h2", "h2", "## abcdef", "二级标题")
+    RichStyle(w, "insertUnorderedList", "ul", "- abcdef", "无序列表")
+    RichStyle(w, "insertOrderedList", "ol", "1. abcdef", "有序列表")
+    RichStyle(w, "codeblock", "pre", "``````", "代码块")
+    RichStyle(w, "insertHorizontalRule", "hr", "---", "分割线")
+
+    ; 行内代码是自定义实现
+    RichEval(w, "__t.put('<p>abcdef</p>');__t.all();1")
+    Sleep 120
+    RichEval(w, "__t.click('code');1")
+    Sleep 220
+    RichSay("行内代码 DOM 有 code", Trim(RichEval(w, "document.querySelector('#editor code') ? 1 : 0")) = "1")
+    RichSay("行内代码 能存成 Markdown", InStr(RichEval(w, "__t.md()"), "``abcdef``") > 0, RichEval(w, "__t.md()"))
+
+    ; 待办
+    RichEval(w, "__t.put('<p>买牛奶</p>');__t.all();1")
+    Sleep 120
+    RichEval(w, "__t.click('task');1")
+    Sleep 220
+    h := RichEval(w, "__t.html()")
+    RichSay("待办 DOM 有 task-line/chk", InStr(h, "task-line") > 0 && InStr(h, "chk") > 0, SubStr(h, 1, 90))
+    RichSay("待办 能存成 - [ ]", InStr(RichEval(w, "__t.md()"), "- [ ] 买牛奶") > 0, RichEval(w, "__t.md()"))
+    RichSay("待办 勾选框走 flex 对齐", InStr(RichEval(w, "getComputedStyle(document.querySelector('.task-line')).display"), "flex") > 0)
+
+    ; 链接（prompt 会挡住自动化，先在页面里把它换掉）
+    RichEval(w, "window.prompt = () => 'https://example.com';__t.put('<p>官网</p>');__t.all();1")
+    Sleep 120
+    RichEval(w, "__t.click('link');1")
+    Sleep 260
+    h := RichEval(w, "__t.html()")
+    RichSay("链接 DOM 有 a[href]", Trim(RichEval(w, "document.querySelector('#editor a[href]') ? 1 : 0")) = "1")
+    RichSay("链接 能存成 Markdown", InStr(RichEval(w, "__t.md()"), "[官网](https://example.com)") > 0, RichEval(w, "__t.md()"))
+
+    ; ---- 图片：paste 一张 8x8 PNG，走完整的"页面 → 宿主存盘 → URL"链路 ----
+    imgDir := App.DataDir "\images"
+    imgBefore := 0
+    Loop Files (imgDir "\*.*")
+        imgBefore++
+
+    RichEval(w, "
+    ( LTrim Join
+    __t.put('<p>图：</p>');__t.all();
+    var c = document.createElement('canvas'); c.width = 8; c.height = 8;
+    var g = c.getContext('2d'); g.fillStyle = '#e04040'; g.fillRect(0, 0, 8, 8);
+    var bin = atob(c.toDataURL('image/png').split(',')[1]);
+    var arr = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    var dt = new DataTransfer();
+    dt.items.add(new File([arr], 'dot.png', { type: 'image/png' }));
+    __t.ed().dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    1;
+    )")
+    Sleep 2200
+
+    src := RichEval(w, "(function(){var i=document.querySelector('#editor img');return i?(i.getAttribute('src')||''):'NONE';})()")
+    imgAfter := 0
+    Loop Files (imgDir "\*.*")
+        imgAfter++
+    RichSay("图片 页面出现 <img>", InStr(src, "NONE") = 0, SubStr(src, 1, 80))
+    RichSay("图片 src 是 file:// 链接", InStr(src, "file:///") > 0, SubStr(src, 1, 80))
+    RichSay("图片 落盘到 data\images", imgAfter = imgBefore + 1, imgBefore " -> " imgAfter)
+    RichSay("图片 正文不留 base64", InStr(RichEval(w, "__t.html()"), "base64,") = 0)
+    mdImg := RichEval(w, "__t.md()")
+    RichSay("图片 能存成 ![...](file://...)", InStr(mdImg, "](file:///") > 0, SubStr(mdImg, 1, 90))
+
+    Sleep 700
+    row := App.Store.Get(id)
+    RichSay("图片 落库后仍是链接", InStr(row.body_html, "file:///") > 0, SubStr(row.body_html, 1, 90))
+
+    /* ---- Markdown 源码模式下插图 ----
+       这条路径和富文本完全分开：源码模式里没有 DOM 插入点，页面先往 textarea
+       写一个 ![](qnote-pending:N) 占位，等宿主回 URL 再替换。曾经只给 #editor
+       挂了 drop/paste，源码模式下拖图粘图毫无反应，所以专门验一遍。 */
+    w.SendType("toggle-md")
+    Sleep 500
+    inMd := RichEval(w, "document.getElementById('source').offsetParent ? 1 : 0")
+    RichSay("源码模式已切换", Trim(inMd) = "1", inMd)
+
+    imgBefore := 0
+    Loop Files (imgDir "\\*.*")
+        imgBefore++
+
+    RichEval(w, "
+    ( LTrim Join
+    (function(){
+      var c = document.createElement('canvas'); c.width = 6; c.height = 6;
+      var g = c.getContext('2d'); g.fillStyle = '#2060d0'; g.fillRect(0, 0, 6, 6);
+      var bin = atob(c.toDataURL('image/png').split(',')[1]);
+      var arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      var dt = new DataTransfer();
+      dt.items.add(new File([arr], 'dot2.png', { type: 'image/png' }));
+      var s = document.getElementById('source');
+      s.focus();
+      s.selectionStart = s.selectionEnd = s.value.length;
+      s.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    })();
+    1;
+    )")
+    Sleep 2200
+
+    srcMd := RichEval(w, "document.getElementById('source').value")
+    imgAfter := 0
+    Loop Files (imgDir "\\*.*")
+        imgAfter++
+    RichSay("源码模式 占位符已被替换成真链接", InStr(srcMd, "qnote-pending") = 0 && InStr(srcMd, "](file:///") > 0, SubStr(srcMd, 1, 100))
+    RichSay("源码模式 图片也落盘", imgAfter = imgBefore + 1, imgBefore " -> " imgAfter)
+
+    w.SendType("toggle-md")
+    Sleep 500
+
+    App.Log("SELFTEST RICH 结论：" (RICH_FAIL = 0 ? "通过" : "未通过") "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+
+    ; 别在用户库里留测试便签
+    App.DeleteNote(id)
+}
+
+; ---- 富文本自检的辅助（一律顶层函数，别写成嵌套函数） ---------------------
+RichEval(w, js) {
+    try
+        return w.wv.ExecuteScriptAsync(js).await()
+    catch as e {
+        App.Log("ExecuteScript 失败：" CleanComError(e.Message))
+        return ""
+    }
+}
+
+RichSay(name, ok, detail := "") {
+    global RICH_PASS, RICH_FAIL
+    if ok
+        RICH_PASS += 1
+    else
+        RICH_FAIL += 1
+    App.Log((ok ? "PASS " : "FAIL ") name (detail != "" ? "  [" detail "]" : ""))
+}
+
+/* 通用流程：塞文字 → 全选 → 点按钮 → 看 DOM 与 Markdown。
+   全选后要等一帧，selectionchange 才会把选区记进页面的 savedRange。 */
+RichStyle(w, cmd, tag, wantMd, label) {
+    RichEval(w, "__t.put('<p>abcdef</p>');__t.all();1")
+    Sleep 120
+    RichEval(w, "__t.click('" cmd "');1")
+    Sleep 220
+    /* 断言用 querySelector 而不是在 innerHTML 里找 "<b>"：ExecuteScriptAsync
+       的返回值是 JSON 编码过的，尖括号会变成 \u003C，直接 InStr 永远匹配不上
+       （第一版就是这么假失败的 11 条）。 */
+    has := RichEval(w, "document.querySelector('#editor " tag "') ? 1 : 0")
+    m := RichEval(w, "__t.md()")
+    RichSay(label " DOM 有 " tag, Trim(has) = "1", has)
+    RichSay(label " 能存成 Markdown " wantMd, InStr(m, wantMd) > 0, SubStr(m, 1, 60))
+}
+
 ; ---- 顶层包装：SetTimer / OnError 传类静态方法引用会踩坑，统一走这里 ----------
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
@@ -773,6 +1016,7 @@ NoteReloadTick() => App.ReloadAll()
 NoteOpen(id) => App.OpenNote(id)
 NoteDelete(id) => App.DeleteNote(id)
 NoteHide(id) => App.HideNote(id)
+NoteRename(id) => App.RenameNote(id)
 NotePin(id, on) => App.SetPin(id, on)
 NoteColor(id, color) => App.SetColor(id, color)
 NoteShowAll() => App.ShowAll()

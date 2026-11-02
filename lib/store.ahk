@@ -18,7 +18,7 @@
 ; ============================================================================
 
 class Store {
-    static SCHEMA_VERSION := 1
+    static SCHEMA_VERSION := 2
 
     db := 0
 
@@ -49,6 +49,7 @@ class Store {
         sql .= " h INTEGER NOT NULL DEFAULT 280,"
         sql .= " pinned INTEGER NOT NULL DEFAULT 0,"
         sql .= " hidden INTEGER NOT NULL DEFAULT 0,"
+        sql .= " title_locked INTEGER NOT NULL DEFAULT 0,"
         sql .= " created_at INTEGER NOT NULL DEFAULT 0,"
         sql .= " updated_at INTEGER NOT NULL DEFAULT 0);"
         sql .= "CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);"
@@ -56,9 +57,32 @@ class Store {
         this.db.Exec(sql)
 
         cur := this.db.Scalar("SELECT v FROM meta WHERE k='schema_version'")
-        if (cur = "")
+        if (cur = "") {
             this.db.Run("INSERT INTO meta(k,v) VALUES('schema_version',?)", String(Store.SCHEMA_VERSION))
-        ; 后续版本按 cur 做增量迁移
+            return
+        }
+        ; ---- 增量迁移：老库按版本号往上补 ----
+        /* v1 -> v2：标题可以手动指定。不加这一列的话，"用户起的名字"会被下一次
+           正文保存时按第一行重算掉。 */
+        if (cur < 2) {
+            this._EnsureColumn("notes", "title_locked", "INTEGER NOT NULL DEFAULT 0")
+            this.db.Run("UPDATE meta SET v=? WHERE k='schema_version'", "2")
+        }
+        /* 版本号只说明"迁移跑过"，不说明"列真在"。踩过一次：上一版把
+           title_locked 只加在迁移分支里，忘了写进 CREATE TABLE，结果新建的库
+           版本号直接就是 2、迁移永远不跑，读行时 m["title_locked"] 抛
+           "Item has no value"。所以这里不看版本，按 PRAGMA 实测补一次。 */
+        this._EnsureColumn("notes", "title_locked", "INTEGER NOT NULL DEFAULT 0")
+    }
+
+    /* 列存在就跳过，不存在就 ALTER。注意 SQLite 的 ALTER TABLE ADD COLUMN
+       不支持 IF NOT EXISTS，只能自己先查 PRAGMA。 */
+    _EnsureColumn(table, col, decl) {
+        for r in this.db.Query("PRAGMA table_info(" table ")") {
+            if (r["name"] = col)
+                return
+        }
+        try this.db.Exec("ALTER TABLE " table " ADD COLUMN " col " " decl)
     }
 
     ; ---- 读 -----------------------------------------------------------------
@@ -136,10 +160,40 @@ class Store {
         return r.lastId
     }
 
-    ; 正文保存：一次写齐四种表示，updated_at 自动更新
+    /* 正文保存：一次写齐四种表示，updated_at 自动更新。
+       title 用 CASE 保护：用户手动改过标题（title_locked=1）以后，正文第一行
+       再怎么变都不许盖掉它 —— 否则"重命名"这个功能等于没做。 */
     SaveBody(id, title, html, text, md, mode) {
-        sql := "UPDATE notes SET title=?, body_html=?, body_text=?, body_md=?, mode=?, updated_at=? WHERE id=?"
+        sql := "UPDATE notes SET title=CASE WHEN title_locked=1 THEN title ELSE ? END,"
+        sql .= " body_html=?, body_text=?, body_md=?, mode=?, updated_at=? WHERE id=?"
         this.db.Run(sql, title, html, text, md, mode, Store.Now(), id)
+    }
+
+    ; 用户指定标题：写进去并上锁
+    SetTitle(id, title) {
+        this.db.Run("UPDATE notes SET title=?, title_locked=1 WHERE id=?", title, id)
+    }
+
+    ; 恢复自动标题：解锁并按正文第一行重算。返回新标题
+    ClearTitle(id) {
+        n := this.Get(id)
+        if !n
+            return ""
+        t := Store.AutoTitle(n.body_text)
+        this.db.Run("UPDATE notes SET title=?, title_locked=0 WHERE id=?", t, id)
+        return t
+    }
+
+    /* 自动标题 = 正文第一行非空内容，超过 60 字截断。
+       从这里算而不是从页面算，是因为"恢复自动标题"是从宿主菜单触发的，
+       那时手里只有库里的 body_text（已经是纯文本了，正好拿来用）。 */
+    static AutoTitle(text) {
+        for line in StrSplit(text, "`n", "`r") {
+            t := Trim(RegExReplace(line, "[ \t]+", " "))
+            if (t != "")
+                return StrLen(t) > 60 ? SubStr(t, 1, 60) "…" : t
+        }
+        return ""
     }
 
     SetGeometry(id, x, y, w, h) {
@@ -188,6 +242,7 @@ class Store {
             h: m["h"],
             pinned: m["pinned"] ? 1 : 0,
             hidden: m["hidden"] ? 1 : 0,
+            title_locked: (m.Has("title_locked") && m["title_locked"]) ? 1 : 0,
             created_at: m["created_at"],
             updated_at: m["updated_at"]
         }

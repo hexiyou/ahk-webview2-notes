@@ -17,6 +17,8 @@ class App {
     static NewNote() => 0
     static ShowList() => 0
     static ZoomFont(step) => 0
+    static RenameNote(id) => 0
+    static SaveImage(raw, id) => 0
     static SetFontSize(px) => 0
     static RefreshTray() => 0
     static OpenExternal(u) => 0
@@ -70,6 +72,7 @@ NoteWindow.Ctx := {
     uiDir: A_ScriptDir "\..\ui",
     dllPath: A_ScriptDir "\..\lib\WebView2Loader.dll",
     dataDir: dataDir "\webview2",
+    imagesDir: dataDir "\images",
     devtools: 0,
     appearance: { transparent: 0, fontSize: 15, drag: "native" }
 }

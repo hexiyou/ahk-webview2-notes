@@ -194,6 +194,9 @@ class NoteWindow {
                 case "font":
                     ; Ctrl+滚轮：页面先自己应用了字号，这里只负责落盘 + 通知其它窗口
                     App.SetFontSize(JsonNum(raw, "size"))
+                case "image":
+                    ; 拖拽/粘贴进来的图：base64 解码 + 落盘，别占着 COM 回调线程
+                    SetTimer(NoteImageTick(this.id, raw), -10)
                 case "delete":
                     SetTimer(ObjBindMethod(this, "ConfirmDelete"), -10)
                 case "open-external":
@@ -402,6 +405,7 @@ class NoteWindow {
         m := Menu()
         m.Add("新建便签", (*) => NoteDeferNew())
         m.Add("便签列表…", (*) => NoteDeferList())
+        m.Add("重命名…", NoteWindow.MB(ObjBindMethod(this, "Rename")))
         m.Add()
         m.Add(this.note.pinned ? "取消置顶" : "置顶"
             , NoteWindow.MB(ObjBindMethod(this, "TogglePin")))
@@ -417,6 +421,7 @@ class NoteWindow {
         m.Add(isMd ? "切换到富文本编辑" : "切换 Markdown 源码"
             , NoteWindow.MB(ObjBindMethod(this, "SendType", "toggle-md")))
         m.Add("复制全文", NoteWindow.MB(ObjBindMethod(this, "CopyAll")))
+        m.Add("插入图片…", NoteWindow.MB(ObjBindMethod(this, "PickImage")))
         m.Add()
         /* 字号也有菜单入口：万一没有滚轮（或触控板不好按 Ctrl+滚轮），
            还能调回来。Ctrl+滚轮 和这里走的是同一套 SetFontSize。 */
@@ -430,6 +435,50 @@ class NoteWindow {
         m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
         m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
         m.Show()
+    }
+
+    /* ---- 插入图片 -----------------------------------------------------------
+       走系统文件框（宿主弹），而不是页面的 <input type=file>：页面那边是从
+       postMessage 里收到指令才想去弹框的，没有用户手势，Chromium 会拦掉。 */
+    PickImage() {
+        f := FileSelect(3, "", "插入图片", "图片 (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp)")
+        if (f = "")
+            return
+        this.InsertImageFile(f)
+    }
+
+    InsertImageFile(src) {
+        try size := FileGetSize(src)
+        catch {
+            App.Toast("读不到这个文件")
+            return
+        }
+        if (size > NoteWindow.MAX_IMAGE) {
+            App.Toast("图片太大了（上限 " Round(NoteWindow.MAX_IMAGE / 1048576) "MB）")
+            return
+        }
+        SplitPath src, , , &ext
+        ext := StrLower(ext)
+        if !RegExMatch(ext, "^(png|jpg|jpeg|gif|webp|bmp)$") {
+            App.Toast("只支持 png / jpg / gif / webp / bmp")
+            return
+        }
+        dst := NoteWindow.NewImagePath(ext)
+        if (dst = "") {
+            App.Toast("图片目录建不出来")
+            return
+        }
+        try FileCopy src, dst
+        catch {
+            App.Toast("复制图片失败")
+            return
+        }
+        this.Send('{"type":"image-in","url":' JsonQuote(NoteWindow.FileUrl(dst)) '}')
+    }
+
+    ; 重命名交给主程序：列表窗口的菜单调的是同一套逻辑，只写一份
+    Rename() {
+        App.RenameNote(this.id)
     }
 
     /* 复制走 AHK 剪贴板而不是页面里的 navigator.clipboard：菜单点击时页面已经
@@ -503,6 +552,102 @@ class NoteWindow {
     static FileUrl(p) {
         return "file:///" StrReplace(StrReplace(p, "\", "/"), " ", "%20")
     }
+
+    /* ---- 图片落盘 -----------------------------------------------------------
+       图片不放数据库：一条便签的记录会从几 KB 涨到几 MB，而且 body_html 和
+       body_md 各存一份，之后每次自动保存都要重写整个 blob，打字都会卡。
+       正文里只留 file:/// 链接。
+
+       代价：数据目录搬家/删了图片，正文里的图就裂了。对"单机便签"这个定位
+       是可以接受的取舍（整个库还是一份文件，拷走就能用 —— 除了图片）。 */
+    static MAX_IMAGE := 8 * 1024 * 1024
+
+    static ImagesDir() {
+        return NoteWindow.Ctx ? NoteWindow.Ctx.imagesDir : ""
+    }
+
+    static NewImagePath(ext) {
+        dir := NoteWindow.ImagesDir()
+        if (dir = "")
+            return ""
+        if !DirExist(dir) {
+            try DirCreate dir
+            catch
+                return ""
+        }
+        return dir "\" FormatTime(A_Now, "yyyyMMdd-HHmmss") "-" NoteWindow.RandHex(4) "." ext
+    }
+
+    static RandHex(n) {
+        s := ""
+        Loop n
+            s .= Format("{:02x}", Random(0, 255))
+        return s
+    }
+
+    /* 页面拖拽/粘贴发来的 data:image/png;base64,xxxx —— 解出来写盘，回 URL。
+       失败就回 image-fail，页面那边把占位图删掉。 */
+    static SaveImage(id, raw) {
+        w := NoteWindow.All.Has(id) ? NoteWindow.All[id] : 0
+        if !w
+            return
+        req := JsonNum(raw, "req")
+        data := JsonStr(raw, "data")
+        path := NoteWindow.WriteDataUrl(data)
+        if (path = "") {
+            w.Send('{"type":"image-fail","req":' req '}')
+            return
+        }
+        w.Send('{"type":"image-ok","req":' req ',"url":' JsonQuote(NoteWindow.FileUrl(path)) '}')
+    }
+
+    static WriteDataUrl(dataUrl) {
+        if !RegExMatch(dataUrl, "^data:image/([a-zA-Z0-9.+-]+);base64,(.+)$", &m)
+            return ""
+        ext := NoteWindow.MimeExt(m[1])
+        buf := NoteWindow.B64Decode(m[2])
+        if !IsObject(buf)
+            return ""
+        path := NoteWindow.NewImagePath(ext)
+        if (path = "")
+            return ""
+        try {
+            f := FileOpen(path, "w")
+            f.RawWrite(buf, buf.Size)
+            f.Close()
+        } catch {
+            return ""
+        }
+        return path
+    }
+
+    static MimeExt(mime) {
+        switch StrLower(Trim(mime)) {
+            case "png": return "png"
+            case "jpeg", "jpg": return "jpg"
+            case "gif": return "gif"
+            case "webp": return "webp"
+            case "bmp": return "bmp"
+        }
+        return "png"
+    }
+
+    /* base64 解码走系统 crypt32，不自己写表：
+       CRYPT_STRING_BASE64(1)，第一遍问长度，第二遍真解。 */
+    static B64Decode(b64) {
+        b64 := RegExReplace(b64, "\s+", "")
+        size := 0
+        if !DllCall("crypt32\CryptStringToBinaryW", "wstr", b64, "uint", StrLen(b64)
+            , "uint", 1, "ptr", 0, "uint*", &size, "ptr", 0, "ptr", 0)
+            return 0
+        if (size = 0)
+            return 0
+        buf := Buffer(size, 0)
+        if !DllCall("crypt32\CryptStringToBinaryW", "wstr", b64, "uint", StrLen(b64)
+            , "uint", 1, "ptr", buf, "uint*", &size, "ptr", 0, "ptr", 0)
+            return 0
+        return buf
+    }
 }
 
 ; ---- 延迟建窗（COM 回调里不能 await，必须换到 SetTimer 的独立线程） -----------
@@ -519,4 +664,9 @@ NoteDeferNew() {
 
 NoteDeferList() {
     SetTimer(() => App.ShowList(), -10)
+}
+
+; 图片消息：闭包捕获 id/raw，跑在 SetTimer 的独立线程里
+NoteImageTick(id, raw) {
+    return () => NoteWindow.SaveImage(id, raw)
 }

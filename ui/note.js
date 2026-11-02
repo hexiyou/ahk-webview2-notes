@@ -31,7 +31,8 @@
     ready: false,
     dirty: false,
     saveTimer: 0,
-    app: { transparent: false, fontSize: 15 }
+    app: { transparent: false, fontSize: 15 },
+    mdPending: {}          // Markdown 源码模式下，上传中的图片占位符：req -> token
   };
 
   /* ---- 与宿主通信 ------------------------------------------------------- */
@@ -51,6 +52,10 @@
         case 'toggle-md': setMode(state.mode === 'md' ? 'rich' : 'md'); break;
         case 'copy-all': copyAll(); break;
         case 'font': applyFontSize(msg.size); break;
+        case 'image-ok': onImageOk(msg); break;
+        case 'image-fail': onImageFail(msg); break;
+        case 'image-in': onImageIn(msg.url); break;
+        case 'pick-image': hint('用拖拽或 Ctrl+V 也能插图'); break;
         case 'focus': editor.focus(); break;
       }
     });
@@ -251,6 +256,10 @@
       insertTask();
     } else if (cmd === 'code') {
       wrapInlineCode();
+    } else if (cmd === 'codeblock') {
+      document.execCommand('formatBlock', false, '<pre>');
+    } else if (cmd === 'link') {
+      insertLink();
     } else if (cmd.startsWith('formatBlock:')) {
       document.execCommand('formatBlock', false, '<' + cmd.split(':')[1] + '>');
     } else {
@@ -283,6 +292,40 @@
     sel.addRange(r2);
   }
 
+  /* 插入链接。分两种情况：有选中文字就给它套链接（createLink），
+     没选中就把 URL 本身当文字插进去（insertHTML）。
+     prompt() 在 WebView2 里是原生对话框，能用；这里不用页面内的小表单，
+     是因为便签最小只有 180px 宽，弹个输入框会把窗口撑得一塌糊涂。 */
+  function insertLink() {
+    const sel = window.getSelection();
+    const picked = sel && !sel.isCollapsed ? sel.toString() : '';
+    const url = window.prompt('链接地址（http:// 或 https://）', 'https://');
+    if (!url) return;
+    const u = url.trim();
+    if (!/^(https?:|mailto:)/i.test(u)) {
+      hint('只支持 http / https / mailto 链接');
+      return;
+    }
+    editor.focus();
+    if (savedRange) {
+      const s = window.getSelection();
+      s.removeAllRanges();
+      s.addRange(savedRange);
+    }
+    if (picked) {
+      document.execCommand('createLink', false, u);
+    } else {
+      const a = document.createElement('a');
+      a.href = u;
+      a.target = '_blank';
+      a.rel = 'noreferrer';
+      a.textContent = u;
+      insertAtCaret(a);
+    }
+    scheduleSave();
+    hint('链接已插入');
+  }
+
   function wrapInlineCode() {
     const sel = window.getSelection();
     if (!sel.rangeCount || sel.isCollapsed) return;
@@ -296,6 +339,170 @@
     sel.removeAllRanges();
     sel.addRange(range);
   }
+
+  /* ---- 图片 ------------------------------------------------------------- */
+
+  /* 图片不进数据库：正文里只存 file:///.../data/images/xxx.png 这样的链接。
+     理由 —— base64 内嵌会让一条便签的记录涨到几 MB，而且 body_html 和 body_md
+     各存一份，之后每敲一个字都要重写整个 blob，编辑器会明显发卡。
+     上传是异步的，所以先在光标处插一个占位 <img data-req="N">，宿主把文件落盘
+     回一个 URL 再补 src。这样用户上传期间继续打字，图片位置也不会跑偏。
+
+     三条入口：拖文件进来、Ctrl+V 粘截图、右键菜单「插入图片…」（宿主弹系统
+     文件框，然后发 image-in 过来 —— 页内 <input type=file> 在没有用户手势的
+     postMessage 上下文里会被浏览器拦，所以那条路走不通）。 */
+  let reqSeq = 0;
+  const MAX_IMG = 8 * 1024 * 1024;
+
+  function caretRange() {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) {
+      const r = sel.getRangeAt(0);
+      if (editor.contains(r.commonAncestorContainer)) return r.cloneRange();
+    }
+    const r = document.createRange();
+    r.selectNodeContents(editor);
+    r.collapse(false);
+    return r;
+  }
+
+  function insertAtCaret(node) {
+    const r = caretRange();
+    r.deleteContents();
+    r.insertNode(node);
+    const after = document.createRange();
+    after.setStartAfter(node);
+    after.collapse(true);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(after);
+  }
+
+  function addImage(file) {
+    if (!file || !file.type || file.type.indexOf('image/') !== 0) { hint('只能插入图片'); return; }
+    if (file.size > MAX_IMG) { hint('图片太大（上限 8MB）'); return; }
+
+    const req = ++reqSeq;
+    if (state.mode === 'md') {
+      // 源码模式没有 DOM 插入点，先写一段占位文本，收到 URL 再换掉
+      const token = '![](qnote-pending:' + req + ')';
+      const s = source;
+      const start = s.selectionStart == null ? s.value.length : s.selectionStart;
+      const end = s.selectionEnd == null ? start : s.selectionEnd;
+      s.value = s.value.slice(0, start) + token + s.value.slice(end);
+      s.selectionStart = s.selectionEnd = start + token.length;
+      state.mdPending[req] = token;
+      scheduleSave();
+    } else {
+      const ph = document.createElement('img');
+      ph.className = 'pending';
+      ph.setAttribute('data-req', String(req));
+      ph.alt = '图片';
+      insertAtCaret(ph);
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      send({ type: 'image', req: req, name: file.name || '', data: String(reader.result) });
+      hint('图片处理中…');
+    };
+    reader.onerror = () => {
+      const el = editor.querySelector('img[data-req="' + req + '"]');
+      if (el) el.remove();
+      hint('读取图片失败');
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function onImageOk(msg) {
+    const el = editor.querySelector('img[data-req="' + msg.req + '"]');
+    if (el) {
+      el.src = msg.url;
+      el.classList.remove('pending');
+      el.removeAttribute('data-req');
+    }
+    const token = state.mdPending[msg.req];
+    if (token) {
+      source.value = source.value.replace(token, '![](' + msg.url + ')');
+      delete state.mdPending[msg.req];
+    }
+    scheduleSave();
+    hint('图片已插入');
+  }
+
+  function onImageFail(msg) {
+    const el = editor.querySelector('img[data-req="' + msg.req + '"]');
+    if (el) el.remove();
+    const token = state.mdPending[msg.req];
+    if (token) {
+      source.value = source.value.replace(token, '');
+      delete state.mdPending[msg.req];
+    }
+    hint('图片没插进去（存盘失败）');
+  }
+
+  // 宿主文件框选的图：这时 URL 已经就绪，直接插
+  function onImageIn(url) {
+    if (!url) return;
+    if (state.mode === 'md') {
+      const s = source;
+      const start = s.selectionStart == null ? s.value.length : s.selectionStart;
+      const txt = '![](' + url + ')';
+      s.value = s.value.slice(0, start) + txt + s.value.slice(s.selectionEnd == null ? start : s.selectionEnd);
+      s.selectionStart = s.selectionEnd = start + txt.length;
+      scheduleSave();
+    } else {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = '图片';
+      insertAtCaret(img);
+      scheduleSave();
+    }
+    hint('图片已插入');
+  }
+
+  /* 拖文件进来：光标先落到鼠标位置，图片才插在"掉下来的地方"。
+     caretRangeFromPoint 在 WebView2（Chromium）里有；取不到就退回当前光标。
+
+     注意两个监听区都要挂：富文本模式粘到 #editor，Markdown 源码模式粘到
+     #source（textarea）。只挂 rich 那一侧的话，用户在源码模式里拖图/粘图
+     会**完全没反应** —— 而 document 级的 preventDefault 又把默认行为拦掉了，
+     连"什么都没发生"都显得莫名其妙。 */
+  function onDrop(e) {
+    const list = (e.dataTransfer && e.dataTransfer.files) || [];
+    const files = Array.from(list).filter(f => f && f.type && f.type.indexOf('image/') === 0);
+    if (!files.length) return;
+    e.preventDefault();
+    document.body.classList.remove('dragging');
+    // textarea 里没有 DOM 选区，caretRangeFromPoint 对它是无意义的，跳过
+    if (state.mode !== 'md') {
+      try {
+        const r = document.caretRangeFromPoint(e.clientX, e.clientY);
+        if (r) {
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+      } catch (_) { /* 取不到就用当前选区 */ }
+    }
+    files.forEach(addImage);
+  }
+
+  // Ctrl+V 粘截图：只拦带图片的粘贴，普通文字照旧走浏览器默认行为
+  function onPaste(e) {
+    const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+    const hit = items.find(it => it.type && it.type.indexOf('image/') === 0);
+    if (!hit) return;
+    const file = hit.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    addImage(file);
+  }
+
+  editor.addEventListener('drop', onDrop);
+  editor.addEventListener('paste', onPaste);
+  source.addEventListener('drop', onDrop);
+  source.addEventListener('paste', onPaste);
 
   /* ---- 勾选框 ----------------------------------------------------------- */
 

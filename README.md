@@ -57,7 +57,9 @@ runtime\AutoHotkey64.exe note.ahk
 | 无边框 + 圆角 | 拖动用系统移动循环（`-webkit-app-region`），缩放用右下角手柄 |
 | 半透明 | 卡片能透出桌面（窗口用 `WS_EX_LAYERED`+`WS_EX_NOREDIRECTIONBITMAP`，页面用 rgba 自绘） |
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
-| 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用 |
+| 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用、链接、代码块、分割线 |
+| 插入图片 | 拖文件进来 / `Ctrl+V` 粘截图 / 右键「插入图片…」；图片存 `data\images`，正文只留链接 |
+| 自定义标题 | 列表和便签的右键菜单都有「重命名…」；不手动改就按正文第一行自动取 |
 | Markdown | `Ctrl+M` 在所见即所得和源码之间切换，两边双向转换 |
 | 字号缩放 | 编辑区 `Ctrl+滚轮` 实时放大 / 缩小（10~32px），所有便签一起变并记住 |
 | 自动保存 | 停止输入 400ms 自动落库，关窗/收起/失焦时补一次 |
@@ -76,6 +78,7 @@ runtime\AutoHotkey64.exe note.ahk
 | `Ctrl+S` | 立即保存 |
 | `Ctrl+M` | 切换 Markdown 源码 |
 | `Ctrl+滚轮` | 放大 / 缩小正文字号（也可用右键菜单的「字号」） |
+| `Ctrl+V` | 粘贴截图 / 图片（拖文件到便签里同样可以） |
 | `Esc` | 失焦、保存 |
 
 全局：
@@ -276,6 +279,9 @@ runtime\AutoHotkey64.exe note.ahk --selftest-list
 # 程序级自检：Ctrl+滚轮 字号（合成 WheelEvent，验放大/上下限/落盘）
 runtime\AutoHotkey64.exe note.ahk --selftest-font
 
+# 程序级自检：富文本工具条 / Markdown 往返 / 图片插入（含源码模式）
+runtime\AutoHotkey64.exe note.ahk --selftest-rich
+
 # 数据层
 runtime\AutoHotkey64.exe tools\probe-store.ahk
 
@@ -450,7 +456,31 @@ pwsh -File tools/make-icon.ps1
     字号是**全局**的（`config.ini` 的 `[appearance] fontSize`），不是每张便签一份：
     改完广播给所有开着的便签，两边一起变，和浏览器 Ctrl+滚轮 一个手感。
 
-27. **AHK 的 `Map.Count` 是属性、自己类的 `Count()` 是方法。** 写 `App.Store.Count`
+27. **★ 图片不要塞进数据库，正文里只存 `file:///` 链接。** `body_html` 和 `body_md` 各存一份，
+    一张 base64 图会让记录涨到几 MB，而自动保存是"每 400ms 重写整条记录"，打字会明显发卡。
+    现在的做法：页面把图读成 data URL 发给宿主 → 宿主用 `crypt32\CryptStringToBinaryW`
+    解码（两遍调用：先问长度再真解）落盘到 `data\images\yyyyMMdd-HHmmss-xxxx.png`
+    → 回一个 `file:///` URL，页面再把占位 `<img data-req="N">` 换成真图。
+    上传是异步的，所以先插占位图：用户上传期间继续打字，图片位置也不会跑偏。
+
+28. **★ 拖拽/粘贴插图要在 `#editor` 和 `#source` 上都挂监听。** 富文本模式和 Markdown
+    源码模式是两个不同的宿主元素（contenteditable / textarea），只挂前者的话，用户在
+    源码模式里拖图、粘图**完全没反应** —— 而 `document` 级的 `preventDefault` 又把浏览器的
+    默认行为拦掉了，表现就是"什么都没发生"。textarea 里没有 DOM 选区，
+    `caretRangeFromPoint` 对它无意义，源码模式直接跳过定位、按当前光标位置插。
+
+29. **★ 加列不能只在 `ALTER TABLE` 里写，建表语句也得有；判断"要不要迁移"不能只看版本号。**
+    踩过：`title_locked` 只加在 v1→v2 迁移分支里，`CREATE TABLE` 忘了写。结果新建的库
+    版本号直接就是 2、迁移永远不跑，读行时 `m["title_locked"]` 抛 `Item has no value`，
+    而且只在**新建的库**上炸（用户的老库先跑过迁移反而是好的），很难复现。
+    现在的写法是 `_EnsureColumn()`：查 `PRAGMA table_info` 实测列在不在，不在就
+    `ALTER TABLE`。版本号只说明"迁移跑过"，不说明"列真在"。
+
+30. **便签标题默认由正文第一行派生，`title_locked` 记录"用户起过名字"。** 保存正文时用
+    `UPDATE notes SET title=CASE WHEN title_locked=1 THEN title ELSE ? END`，一条 SQL
+    搞定"没锁就跟着第一行变、锁了就绝不覆盖"。用户清空输入框 = 解锁 + 按第一行重算。
+
+31. **AHK 的 `Map.Count` 是属性、自己类的 `Count()` 是方法。** 写 `App.Store.Count`
     （漏括号）拿到的是**函数对象**，拼进字符串时报 `Expected a String but got a Func`，
     行号还指在日志那一行，很难往这儿想。另外 `Hotkey(KeyName)` 在 2.0.31 上恒返回空串，
     查不到"这个热键注册了没有"，只能靠注册时自己打日志。
