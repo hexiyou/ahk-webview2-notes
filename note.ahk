@@ -27,6 +27,7 @@
 #Include lib\note-window.ahk
 #Include lib\list-window.ahk
 #Include lib\settings-window.ahk
+#Include lib\ipc.ahk
 
 class App {
     static Name := "QuickNote"
@@ -39,6 +40,7 @@ class App {
     static QueueIdx := 0
     static InstanceLock := 0
     static Bound := 0          ; Map: 热键名 -> 当前真正注册成功的键串
+    static PendingText := ""   ; 命令行 --new "文字" 带进来的初始内容
     ; 字号范围：太小看不清，太大一张便签里放不下几个字
     static FONT_MIN := 10
     static FONT_MAX := 32
@@ -56,7 +58,7 @@ class App {
         ; 1) 单实例：抢到锁的继续，抢不到的唤出已有实例后退出
         App.InstanceLock := DllCall("CreateMutexW", "ptr", 0, "int", 0, "wstr", "Local\QuickNote.SingleInstance", "ptr")
         if (A_LastError = 183) {                 ; ERROR_ALREADY_EXISTS
-            App.PokeRunningInstance()
+            App.ForwardToRunning()
             ExitApp()
         }
 
@@ -65,6 +67,13 @@ class App {
 
         ; 3) 路径与配置
         App.DataDir := App.ResolveDataDir()
+        /* --data-dir <目录>：换一个数据目录跑。自检要一个干净的库，
+           不能往用户真正的 notes.db 里塞测试便签。 */
+        if (dir := App.ArgAfter("--data-dir")) {
+            if !DirExist(dir)
+                DirCreate dir
+            App.DataDir := dir
+        }
         App.EnsureConfig()
         App.LogPath := App.DataDir "\app.log"
         App.MigrateCfg()
@@ -104,9 +113,10 @@ class App {
         g.Show("x-32000 y-32000 w1 h1")
         App.Anchor := g
 
-        ; 唤醒消息：WM_APP + 1
-        ; 走定时器而不是直接调：ShowAll 要建窗，OnMessage 线程里 await 有风险
-        OnMessage(0x8001, (*) => NoteShowAllSoon())
+        /* 外部进程调用入口：新建便签 / 打开列表 / 带内容新建（WM_COPYDATA）。
+           以前这里只挂了一条 0x8001（唤醒），现在统一交给 Ipc 管，消息号见 lib\ipc.ahk。
+           这一行必须在 Boot 之前：便签装载期间外部调用也得受理（排队等着就行）。 */
+        Ipc.Install(App.Anchor.Hwnd)
 
         ; 7) 装载便签（分批，见 BootTick）
         App.Log("启动，数据目录 " App.DataDir "，SQLite " Sqlite.Version())
@@ -125,6 +135,15 @@ class App {
         if App.HasArg("--list")
             App.ShowList()
 
+        /* 命令行 --new "文字"：初始内容。等 Boot 把窗口建完再动手，
+           否则会和 BootTick 抢着建窗口。 */
+        if App.HasArg("--new") {
+            App.PendingText := App.ArgAfter("--new")
+            SetTimer(NoteCliNew, -2400)
+        }
+
+        if App.HasArg("--selftest-ipc")
+            SetTimer(SelfTestIpc, -2500)
         if App.HasArg("--selftest-showall")
             SetTimer(SelfTestShowAll, -2500)
         if App.HasArg("--selftest-menu")
@@ -213,17 +232,56 @@ class App {
             SetTimer(NoteBootTick, 70)
     }
 
-    static NewNote() {
-        count := App.Store.Count()
-        geo := Win.Cascade(count, App.Cfg("window", "width", 300), App.Cfg("window", "height", 280))
-        color := App.Cfg("window", "color", "yellow")
+    /* 新建便签。opts 留空就是"点一下新建"的老行为。
+       opts 可带：text / title / color / pin / activate / x / y / w / h / format
+       —— 热键、托盘、列表、外部 IPC 全走这一份实现，别各写一版。
+
+       format 目前只认 "text"（原样落库）。将来要支持"把内容当 Markdown 渲染"，
+       在这里加一个分支即可：body_md 存原文、body_html 留空，页面 init 会用
+       MD.render(body_md) 填编辑区 —— 那条路页面侧早就通了。 */
+    static NewNote(opts := 0) {
+        o := IsObject(opts) ? opts : Map()
+
+        text := Ipc.Opt(o, "text", "")
+        format := Ipc.Opt(o, "format", "text")
+        if (format != "text")
+            App.Log("新建便签：format=" format " 暂不支持，按纯文本处理")
+
+        title := Trim(Ipc.Opt(o, "title", ""))
+        color := Ipc.Opt(o, "color", "")
+        if (color = "" || !NoteWindow.Colors().Has(color))
+            color := App.Cfg("window", "color", "yellow")
+
+        pin := Ipc.Opt(o, "pin", 0) ? 1 : 0
+        ; 默认抢焦点（内部新建一律抢；外部调用由 Ipc 那边先按 config 定好再传进来）
+        activate := Ipc.Num(o, "activate", 1)
+
+        dw := Ipc.Num(o, "w", 0)
+        dh := Ipc.Num(o, "h", 0)
+        dw := (dw > 0) ? dw : App.Cfg("window", "width", 300)
+        dh := (dh > 0) ? dh : App.Cfg("window", "height", 280)
+        if (Ipc.Has(o, "hasXY") && o["hasXY"])
+            geo := Win.Clamp(Ipc.Num(o, "x", 0), Ipc.Num(o, "y", 0), dw, dh)
+        else
+            geo := Win.Cascade(App.Store.Count(), dw, dh)
+
         id := App.Store.Create(Map(
             "color", color,
-            "x", geo.x, "y", geo.y, "w", geo.w, "h", geo.h))
+            "x", geo.x, "y", geo.y, "w", geo.w, "h", geo.h,
+            "pinned", pin, "hidden", 0,
+            "body_text", text, "body_md", text,
+            "body_html", Ipc.TextToHtml(text), "mode", "rich"))
+        if (title != "")
+            App.Store.SetTitle(id, title)      ; 指定了标题就上锁，别被正文首行盖掉
+        else if (text != "")
+            App.Store.SetAutoTitle(id, Store.AutoTitle(text))
+
         n := App.Store.Get(id)
         w := NoteWindow(n)
-        w.ToFront()
+        if activate
+            w.ToFront()
         App.RefreshList()
+        App.RefreshTray()
         return w
     }
 
@@ -837,7 +895,14 @@ class App {
         text .= "openListOnStart=0`r`n`r`n"
         text .= "[debug]`r`n"
         text .= "; 1 = 允许 F12 打开开发者工具（排查页面问题用）`r`n"
-        text .= "devtools=0`r`n"
+        text .= "devtools=0`r`n`r`n"
+        text .= "[ipc]`r`n"
+        text .= "; 外部进程调用接口（窗口消息 / WM_COPYDATA），细节见 docs\ipc.md`r`n"
+        text .= "; 0 = 完全关掉，只保留单实例唤醒`r`n"
+        text .= "enabled=1`r`n"
+        text .= "; 外部塞进来的便签要不要抢焦点：1 = 弹到最前，0 = 安静地建在角落`r`n"
+        text .= "; 单条调用也可以在载荷里用 activate:0 单独指定`r`n"
+        text .= "activate=1`r`n"
         try {
             f := FileOpen(path, "w", "UTF-16")
             f.Write(text)
@@ -852,17 +917,43 @@ class App {
         return false
     }
 
+    ; 取 --flag 后面那个参数（"最后一个"就不算有）
+    static ArgAfter(flag) {
+        n := A_Args.Length
+        loop n {
+            if (A_Args[A_Index] = flag && A_Index < n)
+                return A_Args[A_Index + 1]
+        }
+        return ""
+    }
+
     static SetCfg(section, key, value) {
         try IniWrite String(value), App.DataDir "\config.ini", section, key
     }
 
-    static PokeRunningInstance() {
-        if hwnd := WinExist(App.Name "Anchor") {
-            PostMessage(0x8001, 0, 0, , "ahk_id " hwnd)
+    /* 第二个实例：把命令行意图转给已经在跑的那个进程。
+       以前只会"全部显示"一下，带进来的参数全丢 —— 有了 IPC 顺手补齐，
+       于是 note.ahk --new "买牛奶" 就成了一个可用的命令行入口。 */
+    static ForwardToRunning() {
+        hwnd := WinExist(App.Name "Anchor")
+        if !hwnd {
+            ; 找不到锚点（极少见）就退而求其次：提示一下
+            MsgBox("便签已经在运行了。`n在托盘图标上双击可以打开列表。", App.Name, "Icon! T2")
             return
         }
-        ; 找不到锚点（极少见）就退而求其次：提示一下
-        MsgBox("便签已经在运行了。`n在托盘图标上双击可以打开列表。", App.Name, "Icon! T2")
+        if App.HasArg("--list") {
+            PostMessage(Ipc.WM_LIST, Ipc.MAGIC, 0, , "ahk_id " hwnd)
+            return
+        }
+        if App.HasArg("--new") {
+            text := App.ArgAfter("--new")
+            if (text = "")
+                PostMessage(Ipc.WM_NEW, Ipc.MAGIC, 0, , "ahk_id " hwnd)
+            else
+                Ipc.SendText(hwnd, text)
+            return
+        }
+        PostMessage(Ipc.WM_WAKE, 0, 0, , "ahk_id " hwnd)     ; 老语义：全部显示
     }
 }
 
@@ -1557,6 +1648,238 @@ SelfTestDialogRun() {
         . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
 }
 
+/* 自检：外部进程调用接口（IPC）。
+   真起一个独立进程（tools\ipc-send.ahk）当发送方 —— 只有跨进程才验得出
+   OnMessage 线程、COPYDATASTRUCT 布局、回执这些坑，进程内自己造消息不算数。 */
+SelfTestIpc() {
+    try SelfTestIpcRun()
+    catch as e {
+        App.Log("SELFTEST IPC 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST IPC 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+IpcMaxId() {
+    max := 0
+    for n in App.Store.All()
+        if (n.id > max)
+            max := n.id
+    return max
+}
+
+IpcLogPath() => App.DataDir "\_ipc-sender.log"
+
+IpcLogClear() {
+    try FileDelete IpcLogPath()
+}
+
+; 起一个真正的独立进程去发消息。发送方自己会 ExitApp，不留尾巴。
+IpcSendRun(args) {
+    sender := A_ScriptDir "\tools\ipc-send.ahk"
+    cmd := '"' A_AhkPath '" "' sender '" --hwnd ' Ipc.Anchor ' --log "' IpcLogPath() '" ' args
+    return Run(cmd, , "Hide")
+}
+
+IpcAwaitLog(ms := 3000) {
+    p := IpcLogPath()
+    end := A_TickCount + ms
+    loop {
+        if FileExist(p) {
+            t := Trim(FileRead(p, "UTF-8"), "`r`n `t")
+            if (t != "")
+                return t
+        }
+        if (A_TickCount > end)
+            return ""
+        Sleep 40
+    }
+    return ""
+}
+
+IpcWaitNewId(before, ms := 3000) {
+    end := A_TickCount + ms
+    loop {
+        id := IpcMaxId()
+        if (id > before)
+            return id
+        if (A_TickCount > end)
+            return 0
+        Sleep 40
+    }
+    return 0
+}
+
+SelfTestIpcRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+
+    sender := A_ScriptDir "\tools\ipc-send.ahk"
+    RichSay("发送脚本存在", FileExist(sender) ? 1 : 0, sender)
+    if (!FileExist(sender) || A_IsCompiled) {
+        App.Log("SELFTEST IPC 结论：跳过（编译版没有 tools\ipc-send.ahk）")
+        return
+    }
+    RichSay("锚点窗口就绪", Ipc.Anchor ? 1 : 0, Ipc.Anchor)
+    RichSay("IPC 默认开启", Ipc.Enabled ? 1 : 0, Ipc.Enabled)
+
+    made := []
+
+    ; ---- 1) WM_NEW：新建一张空便签 ----------------------------------------
+    before := IpcMaxId()
+    IpcLogClear()
+    IpcSendRun("--new")
+    line := IpcAwaitLog()
+    RichSay("WM_NEW 返回 1（已受理）", InStr(line, "reply=1") > 0, line)
+    id1 := IpcWaitNewId(before)
+    RichSay("空便签确实建出来了", id1 ? 1 : 0, "id=" id1)
+    if id1 {
+        made.Push(id1)
+        n := App.Store.Get(id1)
+        RichSay("空便签正文为空", n.body_text = "", "[" n.body_text "]")
+    }
+
+    ; ---- 2) WM_COPYDATA 纯文本：多行 + 中文 + 需要转义的尖括号 -------------
+    txt := "买菜`n1. 鸡蛋 <b>不要</b> `n2. 牛奶"
+    tf := App.DataDir "\_ipc-text.txt"
+    try FileDelete tf
+    f := FileOpen(tf, "w", "UTF-8")
+    f.Write(txt)
+    f.Close()
+
+    before := IpcMaxId()
+    IpcLogClear()
+    IpcSendRun('--text-file "' tf '"')
+    line := IpcAwaitLog()
+    RichSay("纯文本 COPYDATA 返回 1", InStr(line, "reply=1") > 0, line)
+    id2 := IpcWaitNewId(before)
+    RichSay("纯文本便签建出来了", id2 ? 1 : 0, "id=" id2)
+    if id2 {
+        made.Push(id2)
+        n := App.Store.Get(id2)
+        got := Trim(n.body_text, "`r`n")
+        RichSay("正文原样落库（含换行）", got = txt, SubStr(StrReplace(got, "`n", "¶"), 1, 40))
+        RichSay("标题自动取第一行", n.title = "买菜", n.title)
+        RichSay("尖括号被转义，不解析 HTML", InStr(n.body_html, "&lt;b&gt;") > 0,
+            SubStr(n.body_html, 1, 60))
+        RichSay("自动标题没上锁（还会跟着正文变）", n.title_locked = 0, n.title_locked)
+    }
+
+    ; ---- 3) WM_COPYDATA JSON：标题 / 颜色 / 置顶 / 不抢焦点 ----------------
+    js := '{"text":"周会纪要\n- 排期","title":"11-02 周会","color":"blue","pin":1,"activate":0}'
+    jf := App.DataDir "\_ipc-json.txt"
+    try FileDelete jf
+    f := FileOpen(jf, "w", "UTF-8")
+    f.Write(js)
+    f.Close()
+
+    before := IpcMaxId()
+    IpcLogClear()
+    IpcSendRun('--json-file "' jf '"')
+    line := IpcAwaitLog()
+    RichSay("JSON COPYDATA 返回 1", InStr(line, "reply=1") > 0, line)
+    id3 := IpcWaitNewId(before)
+    RichSay("JSON 便签建出来了", id3 ? 1 : 0, "id=" id3)
+    if id3 {
+        made.Push(id3)
+        n := App.Store.Get(id3)
+        RichSay("JSON 标题生效并上锁", n.title = "11-02 周会" && n.title_locked = 1,
+            n.title "/" (n.title_locked ? "locked" : "auto"))
+        RichSay("JSON 颜色生效", n.color = "blue", n.color)
+        RichSay("JSON 置顶生效", n.pinned = 1, n.pinned)
+        RichSay("JSON 里的 \n 还原成换行", InStr(n.body_text, "排期") > 0,
+            SubStr(StrReplace(n.body_text, "`n", "¶"), 1, 40))
+        w := NoteWindow.All.Has(id3) ? NoteWindow.All[id3] : 0
+        act := (w && WinActive("ahk_id " w.gui.Hwnd)) ? 1 : 0
+        RichSay("activate:0 没有把窗口抢到前台", act = 0, act)
+    }
+
+    ; ---- 4) 三种拒绝：魔数错 / dwData 错 / 超过 64KB ----------------------
+    before := IpcMaxId()
+
+    IpcLogClear()
+    IpcSendRun("--bad-magic")
+    line := IpcAwaitLog()
+    RichSay("wParam 魔数不对 → 返回 0", InStr(line, "reply=0") > 0, line)
+    Sleep 300
+    RichSay("魔数错的请求没建出便签", IpcMaxId() = before, IpcMaxId() "/" before)
+
+    IpcLogClear()
+    IpcSendRun('--bad-cd --text "不该进来"')
+    line := IpcAwaitLog()
+    RichSay("dwData 不是 QN01 → 返回 0", InStr(line, "reply=0") > 0, line)
+    Sleep 300
+    RichSay("dwData 错的请求没建出便签", IpcMaxId() = before, IpcMaxId() "/" before)
+
+    IpcLogClear()
+    IpcSendRun("--huge")
+    line := IpcAwaitLog()
+    RichSay("载荷超过 64KB → 返回 0", InStr(line, "reply=0") > 0, line)
+    Sleep 300
+    RichSay("超长载荷没建出便签", IpcMaxId() = before, IpcMaxId() "/" before)
+
+    ; ---- 5) 回执：外部真的能拿到新便签的 id -------------------------------
+    before := IpcMaxId()
+    IpcLogClear()
+    IpcSendRun('--text "带回执的便签" --ack')
+    line := IpcAwaitLog(4500)
+    ackId := 0
+    if RegExMatch(line, "ack=(\d+)", &m)
+        ackId := Integer(m[1])
+    RichSay("要了回执就能等到（ack 非 0）", ackId > 0, line)
+    RichSay("回执 id 正是刚建的那张", ackId && ackId = IpcMaxId(), ackId "/" IpcMaxId())
+    if ackId {
+        made.Push(ackId)
+        n := App.Store.Get(ackId)
+        RichSay("回执便签内容对得上", n && InStr(n.body_text, "带回执的便签") > 0,
+            n ? SubStr(n.body_text, 1, 20) : "?")
+    }
+
+    ; ---- 6) WM_LIST：打开便签列表 -----------------------------------------
+    if ListWindow.IsOpen()
+        App.CloseList()
+    Sleep 200
+    IpcLogClear()
+    IpcSendRun("--list")
+    line := IpcAwaitLog()
+    RichSay("WM_LIST 返回 1", InStr(line, "reply=1") > 0, line)
+    end := A_TickCount + 4000
+    loop {
+        if WinExist("便签列表")
+            break
+        if (A_TickCount > end)
+            break
+        Sleep 60
+    }
+    RichSay("列表窗口确实打开了", WinExist("便签列表") ? 1 : 0)
+    App.CloseList()
+    Sleep 300
+
+    ; ---- 7) [ipc] enabled=0 时整体关闸 ------------------------------------
+    Ipc.Enabled := 0
+    before := IpcMaxId()
+    IpcLogClear()
+    IpcSendRun("--new")
+    line := IpcAwaitLog()
+    RichSay("enabled=0 时一律拒绝", InStr(line, "reply=0") > 0, line)
+    Sleep 300
+    RichSay("关闸期间没建出便签", IpcMaxId() = before, IpcMaxId() "/" before)
+    Ipc.Enabled := 1
+
+    ; ---- 收尾：把测试便签删干净 -------------------------------------------
+    Sleep 300
+    for id in made
+        try App.DeleteNote(id)
+    Sleep 400
+    left := 0
+    for id in made
+        if App.Store.Get(id)
+            left++
+    RichSay("测试便签已全部删除", left = 0, "剩余 " left)
+
+    App.Log("SELFTEST IPC 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+}
+
 /* 自检：四种导出格式。不走 FileSelect（会卡住无人值守的测试），
    直接调 Export.Render 拿字符串断言，顺带真写一个 txt 验编码。 */
 SelfTestExport() {
@@ -2203,6 +2526,8 @@ RichStyle(w, cmd, tag, wantMd, label) {
 ; ---- 顶层包装：SetTimer / OnError 传类静态方法引用会踩坑，统一走这里 ----------
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
+; 命令行 --new "文字"：Boot 完之后再建，别和 BootTick 抢窗口
+NoteCliNew() => App.NewNote(Map("text", App.PendingText))
 NoteShowList() => App.ShowList()
 /* NoteDeferNew / NoteDeferList 定义在 lib\note-window.ahk 里（用它们的地方在那儿），
    这里只保证 note.ahk 的外部调用不需要知道细节。 */

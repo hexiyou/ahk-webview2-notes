@@ -68,6 +68,25 @@ JsonStr(text, key, def := '') {
     return def
 }
 
+/* 键是否存在（只看 `"key"` 后面是不是冒号），不关心值的类型。
+   给"可选参数"用：没传就按默认走，传了 0 也算传了 —— 光靠 JsonNum 的
+   默认值区分不出"没写"和"写了 0"。
+   判法和 JsonStr 一样：InStr 找键，再看后面是否紧跟冒号，避免命中值里的同名文本。 */
+JsonHas(text, key) {
+    needle := '"' key '"'
+    klen := StrLen(needle)
+    n := StrLen(text)
+    p := 0
+    while (p := InStr(text, needle, 1, p + 1)) {
+        i := p + klen
+        while (i <= n && InStr(" `t`r`n", SubStr(text, i, 1)))
+            i++
+        if (SubStr(text, i, 1) = ":")
+            return 1
+    }
+    return 0
+}
+
 ; 数字/布尔字段：前端 postMessage 的是真正的 JSON 字面量，不是字符串
 JsonNum(text, key, def := 0) {
     if RegExMatch(text, '"' key '"\s*:\s*(-?\d+(?:\.\d+)?)', &m)

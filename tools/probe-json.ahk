@@ -119,6 +119,20 @@ Check("数组字段内容（含单引号）"
 Check("数组里的中文", JsonStrArray('{"t":["中文","x"]}', "t")[1] = "中文")
 Check("缺数组字段返回空数组", JsonStrArray('{"x":1}', "tags").Length = 0)
 
+; ---------------------------------------------------------------------------
+; 5. JsonHas：只判断"这个键在不在"（IPC 的可选参数用）
+; ---------------------------------------------------------------------------
+
+Check("字符串键存在", JsonHas('{"a":"1"}', "a") = 1)
+Check("数字 0 也算存在（不能用默认值兜）", JsonHas('{"x":0}', "x") = 1)
+Check("布尔 false 也算存在", JsonHas('{"activate":false}', "activate") = 1)
+Check("null 值也算存在", JsonHas('{"a":null}', "a") = 1)
+Check("缺键返回 0", JsonHas('{"a":1}', "b") = 0)
+Check("带换行缩进也能认出来", JsonHas("{`n  `"w`": 300`n}", "w") = 1)
+Check("键名出现在值里不算", JsonHas('{"a":"他说  ' bs '"x' bs '": 1"}', "x") = 0)
+Check("空文本返回 0", JsonHas("", "x") = 0)
+Check("前缀相同的键不会误判", JsonHas('{"xy":1}', "x") = 0)
+
 Log("=== 结束：PASS " PassN " / FAIL " FailN)
 Sleep 150
 ExitApp FailN ? 1 : 0

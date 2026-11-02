@@ -74,6 +74,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 列表与搜索 | `Ctrl+Alt+L` 打开总览，按关键字全文搜索（含已收起的便签）；列表自己也能置顶（右上角图钉） |
 | 右键菜单 | 便签和列表都支持，用的是系统原生菜单（能超出小窗口边界） |
 | 托盘常驻 | 全局热键随时新建/呼出，关掉便签窗口不退出进程 |
+| **外部调用** | **别的程序发一条窗口消息就能新建便签（纯文本或 JSON），还能拿回新便签的 id** —— 不起 HTTP、不装插件。见 [docs/ipc.md](docs/ipc.md) |
 
 ### 快捷键
 
@@ -213,6 +214,10 @@ openListOnStart=0    ; 1=启动时打开便签列表
 
 [debug]
 devtools=0           ; 1=允许 F12 打开开发者工具
+
+[ipc]
+enabled=1            ; 0=关掉外部调用（只保留"第二个实例唤醒"）
+activate=1           ; 外部塞进来的便签要不要抢焦点
 ```
 
 ### 设置面板
@@ -236,6 +241,39 @@ AHK 那一处，设置面板自动多一个色块。
 
 ---
 
+## 外部调用（IPC）—— 让别的程序往便签里塞东西
+
+这是本程序**最重要的扩展点**：别的程序（你的 AHK 脚本、Python 工具、计划任务、CI 脚本）
+不需要改它、也不需要插件系统，发一条 Windows 消息就能建便签。
+
+```autohotkey
+hwnd := DllCall("FindWindowW", "ptr", 0, "wstr", "QuickNoteAnchor", "ptr")
+SendMessage(0x8010, 0x514E, 0, , "ahk_id " hwnd)          ; 新建一张空便签
+; 带内容要发 WM_COPYDATA，见下面链接里的完整例子
+```
+
+| 能力 | 消息 |
+|---|---|
+| 新建空便签 | `0x8010` |
+| 打开便签列表 | `0x8011` |
+| 带内容新建（纯文本 / 扁平 JSON：标题、颜色、置顶、位置） | `WM_COPYDATA`（`dwData='QN01'`） |
+| 回执：把新便签 id 发回你的窗口 | `0x8014`（宿主 → 调用方） |
+
+* 现成参考实现：`tools\ipc-send.ahk`（独立 AHK，不引用本项目源码）、`tools\ipc-send.py`
+  （Python，只用标准库，含回执）。
+* 命令行也能用：`note.ahk --new "买牛奶"`、`note.ahk --list`。程序已在跑时，新起的那次
+  会自动把参数转发给正在运行的进程。
+* **完整协议、字段表、注意事项、排障表 → [docs/ipc.md](docs/ipc.md)**。
+
+三个必须先知道的边界：
+
+1. `SendMessage` 返回 1 只代表**已受理**，便签是随后在主线程建出来的；
+   要 id 就在载荷里带 `replyTo`，等 `0x8014` 回执。
+2. 只在**同一登录会话、同一权限级别**内有效（UIPI / 会话隔离，代码管不了）。
+3. 载荷上限 64 KB，队列上限 32 条；`WM_COPYDATA` 不能用 `PostMessage` 发。
+
+---
+
 ## 数据存在哪
 
 默认：`%APPDATA%\QuickNote\`
@@ -249,6 +287,9 @@ AHK 那一处，设置面板自动多一个色块。
 ```
 
 **便携模式**：在程序目录放一个 `portable.txt`，数据就改存到 `程序目录\data\`，可以整个拷走。
+
+调试和测试可以用 `--data-dir <目录>` 换一个数据目录跑（`note.ahk --data-dir data\_try`），
+自检就是这么做的 —— 不会往你真正的便签库里塞测试便签。
 
 备份就是拷 `notes.db`（记得先退出程序，或者连 `notes.db-wal` 一起拷）。
 
@@ -282,6 +323,9 @@ WebView2 的合成确实会有差异，这时才需要退回不透明。
 - **单显示器缩放切换**：开了 PerMonitorV2，但跨不同缩放的屏幕拖动时可能有轻微模糊，松开鼠标后恢复。
 - **打开右键菜单时窗口会短暂"卡住"**：原生菜单是同步的，菜单开着期间主线程不处理其他消息
   （其他便签也不响应），关掉菜单立刻恢复。这是 `Menu.Show()` 的固有行为。
+- **外部调用只在本会话、同权限级别内有效**：管理员身份运行的便签收不到普通权限脚本的消息
+  （UIPI），另一个 RDP 会话/另一个登录用户也发不进来。要跨这些边界就得换成命名管道或 HTTP
+  （见 `docs\ipc.md` 第 2 节的取舍）。
 
 ---
 
@@ -297,6 +341,7 @@ wv2-notes/
 │  ├─ note-window.ahk    一张便签 = 一个 Gui + 一个 WebView2（含两套右键菜单）
 │  ├─ list-window.ahk    列表面板（单例）
 │  ├─ settings-window.ahk 设置面板（单例 WebView2，ui\settings.*）
+│  ├─ ipc.ahk            ★ 外部调用接口：锚点窗口消息 + WM_COPYDATA + 回执（见 docs\ipc.md）
 │  ├─ export.ahk         单张导出：TXT / MD / HTML / RTF
 │  ├─ win.ahk            窗口外观（透明/圆角/工作区/级联落点）
 │  ├─ json.ahk           极简 JSON（只处理扁平字段；大字段走线性扫描，别用正则）
@@ -312,8 +357,11 @@ wv2-notes/
 ├─ assets/note.ico       图标
 ├─ runtime/              自带的 AutoHotkey 运行时
 ├─ tools/                冒烟测试、端到端测试、图标生成
+│  ├─ ipc-send.ahk       ★ 外部调用示例（AHK，独立可拷走）
+│  └─ ipc-send.py        ★ 外部调用示例（Python，含回执）
 ├─ tests/md.test.js      Markdown 单测
 └─ docs/
+   └─ ipc.md             ★ 外部调用协议文档
 ```
 
 ---
@@ -342,7 +390,7 @@ runtime\AutoHotkey64.exe tools\probe-newbug.ahk
 # 菜单：回调参数个数、闭包、菜单项是否都包了包装器、两套右键菜单的两端是否对得上（77 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-menu.ahk
 
-# JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界（26 项断言，很快）
+# JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界 / 键存在性（35 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-json.ahk
 
 # 程序级自检：收起全部→全部显示，看窗口是不是真回到屏幕上
@@ -378,6 +426,10 @@ runtime\AutoHotkey64.exe note.ahk --selftest-settings
 
 # 程序级自检：重命名框（置顶/普通两版 + 置顶便签的端到端）
 runtime\AutoHotkey64.exe note.ahk --selftest-dialog
+
+# 程序级自检：外部调用接口 —— 真起一个独立进程（tools\ipc-send.ahk）发消息，
+#              验纯文本/JSON/回执/三种拒绝/开关闸（33 项断言，约 8 秒）
+runtime\AutoHotkey64.exe note.ahk --data-dir data\_ipctest --selftest-ipc
 
 # 给 README 生成设置面板截图（写到 assets\shot-settings.png）
 runtime\AutoHotkey64.exe note.ahk --shot-settings
@@ -743,6 +795,38 @@ pwsh -File tools/make-icon.ps1
     现在单独有 `NoteWindow.ColorKeys()` 定显示顺序，便签菜单、列表菜单、设置面板
     都按它排；`probe-menu` 会把两张表互相比对，漏一个或多一个都报。
     设置面板的色块也由宿主把颜色表发过去现画，页面里不存第二份表。
+
+52. **★★ `OnMessage` 回调里绝不能建 WebView2。** 回调跑在 AHK 的**新线程**里，会随时
+    打断主线程（和 `SetTimer` 一个性质）；而建 controller 要 `await`，COM 回调里
+    `await` 永不返回。真在那儿建窗，症状是**发送方的 `SendMessage` 一直卡着、整个程序冻住**
+    —— 比"点了没反应"更难查，因为看起来是外部程序坏了。
+    所以 IPC 回调只做「校验 + 入队」，真正建窗交给 `SetTimer(IpcDrain, -1)`。
+    这条纪律和菜单/设置窗那几处是同一套（见笔记 20）。
+
+53. **`WM_COPYDATA` 是同步的，返回 1 只代表"已受理"。** 发送方会一直等到你返回，
+    而你的返回必须**早于**便签被建出来（建窗要 200~500ms）。所以语义只能是
+    "收下了"，不是"建好了"。要 id 就得传 `replyTo`、建完再 `PostMessage(0x8014, id)`。
+    文档里必须写死这一条，否则调用方会拿返回值当 id 用。
+
+54. **★ 64 位 `COPYDATASTRUCT` 的 `lpData` 在偏移 16，不是 12。**
+    布局是 `DWORD_PTR(8) + DWORD(4) + 4 字节对齐 + PVOID(8)`。
+    手搓指针时按 8/12 取会读到垃圾指针，轻则拒收、重则访问违例。
+    用结构体声明（C#/Python `ctypes.Structure`）就不会错；AHK 里只能自己算，
+    所以 `A_PtrSize = 8 ? 16 : 8` 两路都写了。
+
+55. **AHK 的 `PostMessage` 找不到 message-only 窗口。** 回执的信箱窗口常常是
+    `CreateWindowEx(..., HWND_MESSAGE, ...)` 建的"消息窗口"，而 AHK 的 WinTitle
+    搜索只覆盖**顶层窗口** —— `PostMessage(0x8014, id, 0, , "ahk_id " h)` 会**静默失败**。
+    用 Python 那版示例验证时踩到：`app.log` 里是"投递失败"，调用方永远等不到回执。
+    改成 `DllCall("PostMessageW", "ptr", h, "uint", msg, "ptr", w, "ptr", 0, "int")` 就好了。
+    （顺带：这也说明"AHK 自己的 API 发不出去"不一定是对面的问题。）
+
+56. **"指定标题"和"自动标题"必须是两条路。** `SetTitle` 的语义是"用户亲自命名"，
+    会写 `title_locked=1`；而外部塞进来的正文一开始没有标题，得先按首行生成一个给列表看，
+    但用户之后改首行时它应该继续跟着变。第一版图省事用了 `SetTitle`，结果外部建的便签
+    标题被永久钉死 —— `--selftest-ipc` 的"自动标题没上锁"那条断言当场抓到，
+    于是补了 `Store.SetAutoTitle()`（显式 `title_locked=0`）。
+    结论：**名字里带"设置"的方法，先想清楚它是不是隐含了"锁定"语义。**
 
 50. **`HasVal()` 在这个 AHK 版本里不存在。** 探针里用它查数组，`#Warn` 把
     `HasVal` 当成"从未赋值的全局变量"，弹了个模态框把整个探针卡住 —— 现象是

@@ -174,6 +174,14 @@ class Store {
         this.db.Run("UPDATE notes SET title=?, title_locked=1 WHERE id=?", title, id)
     }
 
+    /* 自动标题：写进去但**不上锁**。和 SetTitle 必须分开 ——
+       外部进程塞进来的正文一开始没有标题，得先按首行生成一个给列表看，
+       但用户之后改正文首行时它应该继续跟着变（SetTitle 是"用户亲自命名"，
+       语义完全不同，混用会把标题钉死）。 */
+    SetAutoTitle(id, title) {
+        this.db.Run("UPDATE notes SET title=?, title_locked=0 WHERE id=?", title, id)
+    }
+
     ; 恢复自动标题：解锁并按正文第一行重算。返回新标题
     ClearTitle(id) {
         n := this.Get(id)
