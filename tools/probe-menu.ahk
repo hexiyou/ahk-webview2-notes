@@ -378,6 +378,48 @@ try {
 Check("Menu.Disable 必须传带加速键的完整名字"
     , byName = 0 && byFull = 1, "显示名=" byName " 完整串=" byFull)
 
+; ---------------------------------------------------------------------------
+; 10. 代码块右上角的「复制」按钮
+;     这里只钉住"位置和接线"这几条容易改坏的地方：
+;       · 按钮必须在 #editor 外面（进去就会被当成正文存进库）
+;       · 按钮不能在 <pre> 里（进去就会被着色重绘冲掉）
+;       · 点击发 clipboard-set，宿主用 Clip.SetText 写（顺带换 CRLF）
+;     端到端（位置、剪贴板内容、回执、收起）在 note.ahk --selftest-codecopy。
+; ---------------------------------------------------------------------------
+
+noteHtml := FileRead(A_ScriptDir "\..\ui\note.html", "UTF-8")
+Check("页面有代码复制按钮", InStr(noteHtml, "id=`"codeCopy`"") > 0)
+iEd := InStr(noteHtml, "id=`"editor`"")
+iBtn := InStr(noteHtml, "id=`"codeCopy`"")
+Check("按钮在 #editor 之后（不在编辑区里）"
+    , iEd > 0 && iBtn > iEd, "editor=" iEd " btn=" iBtn)
+Check("按钮是 #editor 的兄弟节点，不在 <pre> 里"
+    , RegExMatch(noteHtml, "(?s)<div[^>]*id=`"editor`".*?</main>.*id=`"codeCopy`"") > 0)
+Check("页面点按钮发 clipboard-set", InStr(noteJs, "type: 'clipboard-set'") > 0)
+Check("页面能接住 copy-code（右键菜单那条路）", InStr(noteJs, "case 'copy-code':") > 0)
+Check("宿主有「复制这段代码」菜单项", InStr(srcWin, "复制这段代码") > 0)
+Check("宿主用 Clip.SetText 写文字剪贴板"
+    , InStr(srcWin, "Clip.SetText(") > 0 && Clip.HasMethod("SetText"))
+Check("页面鼠标移开就收起（有 200ms 缓冲）"
+    , InStr(noteJs, "hideCodeCopySoon") > 0 && InStr(noteJs, "200") > 0)
+
+/* Clip.SetText 的 CRLF 转换是"记事本里不挤成一行"的前提，直接验一遍。
+   测完把剪贴板还原，别动用户的东西。 */
+oldText := ""
+try oldText := A_Clipboard
+okSet := Clip.SetText("甲`n乙")
+gotLf := ""
+try gotLf := A_Clipboard
+Check("Clip.SetText 把 LF 换成 CRLF"
+    , okSet = 1 && gotLf = "甲`r`n乙", StrLen(gotLf))
+okSet2 := Clip.SetText("甲`r`n乙")
+gotCrlf := ""
+try gotCrlf := A_Clipboard
+Check("Clip.SetText 不会把 CRLF 变成 CRCRLF"
+    , okSet2 = 1 && gotCrlf = gotLf, StrLen(gotCrlf))
+Check("Clip.SetText 空串不写剪贴板", Clip.SetText("") = 0)
+try A_Clipboard := oldText
+
 App.Log("=== 结束：PASS " PassN " / FAIL " FailN)
 Sleep 150
 ExitApp FailN ? 1 : 0

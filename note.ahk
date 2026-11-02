@@ -176,6 +176,8 @@ class App {
             SetTimer(SelfTestHotkey, -2500)
         if App.HasArg("--selftest-image")
             SetTimer(SelfTestImage, -2500)
+        if App.HasArg("--selftest-codecopy")
+            SetTimer(SelfTestCodeCopy, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -1852,6 +1854,10 @@ SelfTestShotCode() {
             + '</code></pre>'
             + '<p>右侧 <b>⋯</b> 是便签菜单，正文里右键是编辑菜单。</p>';
           window.CodeHL.paintAll(ed, { force: true });
+          /* 把鼠标"停"在第一个代码块上，右上角的复制按钮才会浮出来 —
+             截图里看得见，才知道有这么个东西。 */
+          ed.querySelector('pre').dispatchEvent(
+            new MouseEvent('mousemove', { bubbles: true, buttons: 0 }));
           return 1;
         })()
         )")
@@ -3177,6 +3183,190 @@ SelfTestImageRun() {
             try FileDelete A_LoopFilePath
     }
     ; 剪贴板还回去（原来是什么就不知道了，只能还原文本）
+    if (oldClip != "")
+        try A_Clipboard := oldClip
+}
+
+/* 自检：代码块右上角的「复制」按钮。
+   验的是四件事：
+     1) 按钮位置/归属 —— 必须在 body 下、不在 <pre> 里（否则被重绘冲掉）、
+        不在 #editor 里（否则被当正文存进库）；
+     2) 点下去剪贴板里真的是整段代码，换行是 CRLF、末尾不多空行；
+     3) 鼠标移开、切到 Markdown 模式时会收起；
+     4) 右键菜单那条「复制这段代码」和按钮走同一条路。
+   跑完删掉自己建的便签，剪贴板还原。 */
+SelfTestCodeCopy() {
+    try SelfTestCodeCopyRun()
+    catch as e {
+        App.Log("SELFTEST CODECOPY 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST CODECOPY 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestCodeCopyRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    oldClip := ""
+    try oldClip := A_Clipboard
+
+    id := App.Store.Create(Map("title", "代码复制测试", "body_text", "x"))
+    w := App.OpenNote(id)
+    if !w {
+        App.Log("SELFTEST CODECOPY 没能打开便签")
+        return
+    }
+    Loop 40 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("页面就绪", w.ready = 1, w.ready)
+
+    /* 页面里的测试脚手架。故意把"悬停"写成 dispatchEvent，而不是真的移动
+       鼠标：本机 SendInput 会卡死（见 README 实现笔记），合成事件走的是
+       note.js 里 mousemove 监听器的同一条路。 */
+    RichEval(w, "
+    ( LTrim Join
+    window.__c = {
+      ed: () => document.getElementById('editor'),
+      btn: () => document.getElementById('codeCopy'),
+      pre: () => document.querySelector('#editor pre'),
+      put(code) {
+        this.ed().innerHTML = '<pre><code></code></pre>';
+        const c = this.ed().querySelector('pre code');
+        c.className = 'language-python';
+        c.textContent = code;
+      },
+      hover(el) {
+        el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, buttons: 0 }));
+      },
+      state() {
+        const b = this.btn();
+        const p = this.pre();
+        if (!p) return 'nopre';
+        if (b.hidden) return 'hidden';
+        const br = b.getBoundingClientRect();
+        const pr = p.getBoundingClientRect();
+        return [1, Math.round(br.top - pr.top), Math.round(pr.right - br.right)
+          , this.ed().contains(b) ? 1 : 0, p.contains(b) ? 1 : 0].join('|');
+      },
+      label() {
+        return this.btn().textContent.trim() + '|' + (this.btn().classList.contains('ok') ? 1 : 0);
+      },
+      textOk() {
+        return window.CodeHL.textOf(this.pre()) === 'a = 1\nif a:\n    print(a)\nb = 2' ? 'same' : 'diff';
+      },
+      btnInHtml() {
+        return this.ed().innerHTML.indexOf('codeCopy') >= 0 ? 'has' : 'clean';
+      }
+    };
+    1;
+    )")
+
+    code := 'a = 1\nif a:\n    print(a)\nb = 2'
+    want := "a = 1`r`nif a:`r`n    print(a)`r`nb = 2"
+
+    RichEval(w, "__c.put('" code "');1")
+    Sleep 200
+    RichSay("一开始按钮是收着的"
+        , Trim(JStr(RichEval(w, "__c.btn().hidden ? 1 : 0"))) = "1")
+
+    /* ---- 1. 悬停浮出 + 位置 + 归属 --------------------------------------- */
+    RichEval(w, "__c.hover(__c.pre());1")
+    Sleep 150
+    st := JStr(RichEval(w, "__c.state()"))
+    parts := StrSplit(st, "|")
+    RichSay("鼠标移到代码块上 → 按钮浮出", parts.Length >= 5 && parts[1] = "1", st)
+    RichSay("按钮贴在块的右上角（top 0~10px、右侧留 0~20px）"
+        , parts.Length >= 5 && parts[2] >= 0 && parts[2] <= 10 && parts[3] >= 0 && parts[3] <= 20, st)
+    RichSay("按钮不在 <pre> 里（否则被着色重绘冲掉）", parts.Length >= 5 && parts[5] = "0", st)
+    RichSay("按钮不在 #editor 里（否则被当正文存进库）", parts.Length >= 5 && parts[4] = "0", st)
+    RichSay("代码正文没被按钮上的字污染", JStr(RichEval(w, "__c.textOk()")) = "same")
+
+    /* ---- 2. 点一下 = 整段进剪贴板 ---------------------------------------- */
+    got := ""
+    try A_Clipboard := "sentinel"
+    RichEval(w, "__c.btn().click();1")
+    Loop 12 {
+        Sleep 100
+        try got := A_Clipboard
+        if (got != "sentinel")
+            break
+    }
+    digest := StrReplace(StrReplace(got, "`r`n", "|"), "`n", "¶")
+    RichSay("点按钮 → 剪贴板就是整段代码", got = want, digest)
+    RichSay("换行是 CRLF（记事本才不会挤成一行）"
+        , StrLen(got) = StrLen(want) && InStr(got, "`r`n") > 0, StrLen(got))
+    RichSay("末尾没多出空行", SubStr(got, -2) != "`r`n", SubStr(got, -4))
+
+    RichSay("按钮当场变「已复制」（状态栏也有回执）"
+        , JStr(RichEval(w, "__c.label()")) = "已复制|1", JStr(RichEval(w, "__c.label()")))
+    Sleep 1400
+    RichSay("1.2 秒后按钮文字自己复原"
+        , JStr(RichEval(w, "__c.label()")) = "复制|0", JStr(RichEval(w, "__c.label()")))
+
+    /* ---- 3. 鼠标移开就收起 ----------------------------------------------- */
+    RichEval(w, "__c.hover(__c.ed());1")
+    Sleep 400
+    RichSay("鼠标移出代码块 → 按钮收起"
+        , Trim(JStr(RichEval(w, "__c.btn().hidden ? 1 : 0"))) = "1")
+
+    /* ---- 4. 重绘之后按钮还在（它本来就不在 <pre> 里，重绘碰不到它） -------- */
+    RichEval(w, "window.CodeHL.paintAll(document.getElementById('editor'), {force:true});1")
+    Sleep 150
+    RichEval(w, "__c.hover(__c.pre());1")
+    Sleep 150
+    st2 := JStr(RichEval(w, "__c.state()"))
+    p2 := StrSplit(st2, "|")
+    RichSay("代码块重新着色后按钮照常浮出", p2.Length >= 5 && p2[1] = "1", st2)
+
+    /* ---- 5. 右键菜单那条入口 --------------------------------------------- */
+    zone := JStr(RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const br = window.chrome.webview;
+      const orig = br.postMessage.bind(br);
+      let last = null;
+      br.postMessage = function(m){ last = m; };
+      const pre = document.querySelector('#editor pre');
+      pre.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      br.postMessage = orig;
+      return (last && last.zone ? last.zone : '-') + '|' + (last && last.inpre ? 1 : 0)
+        + '|' + (document.getElementById('codeCopy').hidden ? 1 : 0);
+    })()
+    )"))
+    RichSay("在代码块里右键 → 编辑菜单 + inpre=1，按钮让路", zone = "edit|1|1", zone)
+
+    try A_Clipboard := "sentinel"
+    w.Cmd("copy-code")
+    got2 := "sentinel"
+    Loop 15 {
+        Sleep 100
+        try got2 := A_Clipboard
+        if (got2 != "sentinel")
+            break
+    }
+    RichSay("菜单「复制这段代码」结果一样", got2 = want
+        , StrReplace(StrReplace(got2, "`r`n", "|"), "`n", "¶"))
+
+    /* ---- 6. 落库的 HTML 里没有按钮 --------------------------------------- */
+    RichSay("editor.innerHTML 里没有按钮节点", JStr(RichEval(w, "__c.btnInHtml()")) = "clean")
+    w.Cmd("save")
+    Sleep 600
+    row := App.Store.Get(id)
+    RichSay("存进库的 body_html 也没被污染", InStr(row.body_html, "codeCopy") = 0
+        , SubStr(row.body_html, 1, 80))
+
+    /* ---- 7. Markdown 源码模式里没有代码块 DOM，按钮必须收起来 ------------- */
+    w.SendType("toggle-md")
+    Sleep 600
+    RichSay("切到 Markdown 源码 → 按钮消失"
+        , Trim(JStr(RichEval(w, "__c.btn().hidden ? 1 : 0"))) = "1")
+
+    App.Log("SELFTEST CODECOPY 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+
+    App.DeleteNote(id)
     if (oldClip != "")
         try A_Clipboard := oldClip
 }

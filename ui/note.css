@@ -373,6 +373,37 @@ body[data-max="1"] .grip { display: none; }
 .floatbar button:hover { background: rgba(0, 0, 0, .08); }
 .floatbar button.mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; }
 
+/* ---- 代码块右上角的「复制」按钮 ----------------------------------------
+   固定定位，坐标由 note.js 按代码块的 getBoundingClientRect() 算。
+   为什么不用绝对定位挂在 <pre> 里：见 note.js 那段注释 —— 会被着色重绘冲掉，
+   也会被当成正文存进库。 */
+.codecopy {
+  position: fixed;
+  z-index: 24;                 /* 高于正文/浮动工具条，低于大图遮罩(60) */
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 21px;
+  padding: 0 7px 0 6px;
+  border: 0;
+  border-radius: 6px;
+  /* 便签底色五花八门（黄粉蓝绿…），按钮自己带一层浅底，什么色上都看得清 */
+  background: rgba(255, 255, 255, .82);
+  color: #4a443c;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .14), 0 0 0 1px rgba(0, 0, 0, .06);
+  transition: background-color .12s, color .12s;
+}
+.codecopy[hidden] { display: none; }
+.codecopy:hover { background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, .18), 0 0 0 1px rgba(0, 0, 0, .08); }
+/* 复制成功的 1.2 秒回执：绿色 + 文字换成"已复制"，不用抬头看状态栏 */
+.codecopy.ok { color: #2c7a39; }
+.codecopy svg { flex: 0 0 auto; }
+.codecopy span { white-space: nowrap; }
+
 /* ---- 滚动条 ------------------------------------------------------------ */
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }

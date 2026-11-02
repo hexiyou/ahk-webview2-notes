@@ -62,6 +62,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
 | 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用、链接、代码块、分割线 |
 | 代码着色 | 代码块自动上色（本地 highlight.js，离线可用）；右键「代码语言」可手动指定，导出 HTML 也带着颜色 |
+| **代码一键复制** | 鼠标移到代码块上，右上角浮出「复制」按钮，点一下整段代码进剪贴板（换行是 CRLF，粘进记事本也是一行一行）；右键菜单里也有「复制这段代码」，按钮被滚走时用它 |
 | 三套右键菜单 | 正文里是**编辑菜单**（撤销/剪切/复制/粘贴/全选/清除格式），图片上是**图片菜单**（复制图片/另存为/删除），标题栏和其它地方是**便签菜单**（置顶/颜色/导出/删除…） |
 | 插入图片 | 拖文件进来 / `Ctrl+V` 粘截图 / 右键「插入图片…」；图片存 `data\images`，正文只留链接 |
 | 看图 | 正文里的图按 180px 高缩略显示，点一下铺满窗口看原图（再点或 `Esc` 关） |
@@ -93,6 +94,7 @@ runtime\AutoHotkey64.exe note.ahk
 | `Ctrl+C`（看图时） | 把正在看的那张图复制到剪贴板（等于图片菜单的「复制图片」） |
 | 双击标题栏 | 最大化 / 还原窗口（铺满当前显示器的工作区，不遮任务栏） |
 | `Enter`（代码块里） | 正常换行，可以一行一行往下敲 |
+| 鼠标移到代码块上 | 右上角浮出「复制」按钮，点一下复制整段代码 |
 | `Enter`（空行上）/ `Ctrl+Enter` / `↓`（块尾） | 跳出代码块 |
 | `Tab` / `Shift+Tab`（代码块里） | 缩进 / 退掉两格 |
 | `Esc` | 代码块里 = 跳出；看图时 = 关闭大图；其它情况 = 失焦并保存 |
@@ -148,9 +150,10 @@ runtime\AutoHotkey64.exe note.ahk
 全选        Ctrl+A
 清除格式
 ────────────
-插入代码块
+复制这段代码                  光标在代码块里才有；和右上角的悬浮按钮同一条路
 代码语言 ›   自动识别 / 纯文本 / JS / TS / Python / HTML / CSS / JSON / Bash …
              （只有光标在代码块里时才出现，当前语言打勾）
+插入代码块
 插入图片…
 ────────────
 保存        Ctrl+S
@@ -376,7 +379,7 @@ wv2-notes/
 │  ├─ settings-window.ahk 设置面板（单例 WebView2，ui\settings.*）
 │  ├─ ipc.ahk            ★ 外部调用接口：锚点窗口消息 + WM_COPYDATA + 回执（见 docs\ipc.md）
 │  ├─ export.ahk         单张导出：TXT / MD / HTML / RTF
-│  ├─ clip.ahk           ★ 图片进剪贴板（CF_DIB + PNG 两种格式）
+│  ├─ clip.ahk           ★ 剪贴板：文字（LF→CRLF）+ 图片（CF_DIB + PNG）
 │  ├─ win.ahk            窗口外观（透明/圆角/工作区/级联落点）
 │  ├─ json.ahk           极简 JSON（只处理扁平字段；大字段走线性扫描，别用正则）
 │  ├─ WebView2/          WebView2 AHK 绑定（第三方，v2.0.5）
@@ -421,7 +424,8 @@ runtime\AutoHotkey64.exe tools\probe-sort.ahk
 # 回归"点完新建就拖不动"：真鼠标点「新建」再拖两个窗口（8 项断言，需先启动 run.bat）
 runtime\AutoHotkey64.exe tools\probe-newbug.ahk
 
-# 菜单：回调参数个数、闭包、菜单项是否都包了包装器、三套右键菜单的两端是否对得上（131 项断言，很快）
+# 菜单：回调参数个数、闭包、菜单项是否都包了包装器、三套右键菜单的两端是否对得上、
+#       代码复制按钮的接线 + Clip.SetText 的 CRLF 转换（143 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-menu.ahk
 
 # JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界 / 键存在性（35 项断言，很快）
@@ -455,6 +459,11 @@ runtime\AutoHotkey64.exe note.ahk --selftest-hotkey
 #              PNG 格式 → 另存为补扩展名 + 只复制路径 → 三套菜单的 zone=image / Ctrl+C /
 #              从正文删除；17 项断言）
 runtime\AutoHotkey64.exe note.ahk --selftest-image
+
+# 程序级自检：代码块右上角的复制按钮（悬停浮出 + 位置/归属 + 剪贴板内容与 CRLF +
+#              「已复制」回执 + 移开收起 + 重新着色后仍可用 + 右键菜单入口 +
+#              不污染落库的 HTML；19 项断言）
+runtime\AutoHotkey64.exe note.ahk --selftest-codecopy
 
 # 程序级自检：Ctrl+滚轮 字号（合成 WheelEvent，验放大/上下限/落盘）
 runtime\AutoHotkey64.exe note.ahk --selftest-font
@@ -990,3 +999,35 @@ pwsh -File tools/make-icon.ps1
     `Nonexistent menu item.`；被 `try` 吞掉之后表现是"该灰的项没灰"，用户点下去才发现
     找不到文件。`probe-menu` 里专门留了一条断言钉这个规则。
     顺便记一下：菜单项回调要套 `MB()`（笔记 44）、菜单只能在独立线程里 `Show`。
+
+70. **代码块上的悬浮按钮不能住在 `<pre>` 或 `#editor` 里。** 两个方向都会坏：
+    放进 `<pre>` —— `CodeHL.paint()` 是直接换 `innerHTML`，按钮会被整块冲掉；而且
+    `textOf()` 会把按钮上"复制"两个字算进代码，复制/导出全带上它。
+    放进 `#editor` —— `snapshot()` 取的就是 `editor.innerHTML`，按钮会被当成正文存进库，
+    重新打开便签凭空多出一个按钮。
+    所以它是 `body` 下的一级节点，`position: fixed`，靠 `getBoundingClientRect()`
+    跟着块走。不在文档流里，开关也不影响光标和排版。
+    同理，监听器**不能挂在 `<pre>` 上**（重绘时整块换掉，监听器跟着没了），
+    统一挂 `document` 的 `mousemove`，用 `e.target` 反查是哪一块。
+
+71. **`display: none` 的元素量不出尺寸。** 第一版是"先量位置、再显示"，于是
+    `offsetWidth` 永远是 0，每次都落到兜底的 56px —— 窄便签里按钮会顶到右边框
+    外面 6px（自检量出来是 12px 的留白）。改成**先 `hidden = false` 再
+    `placeCodeCopy()`**，摆不下（块已经滚出视野）再收回去。自检里"右侧留 0~20px"
+    那条断言就是抓这个的：修之前 12，修之后正好 6。
+
+72. **页面给的文字进剪贴板，要自己把 LF 换成 CRLF。** AHK 的 `A_Clipboard` 赋值
+    **不会**自动转换（实测：写 `"a`nb"` 进去，读回来长度 3、没有 CR），而记事本、
+    Word、不少国产办公软件只认 CRLF —— 多行代码粘过去会挤成一行。
+    统一走 `Clip.SetText()`（`RegExReplace(text, "\r?\n", "`r`n")`），
+    `clipboard-set` 那条消息也顺手改用它，编辑菜单的"复制/剪切"一起受益。
+    正则用 `\r?\n` 而不是裸 `\n`，已经带 CR 的输入不会变成 `\r\r\n`。
+
+73. **复制整段代码要削掉末尾那个换行。** `<pre>` 的排版产物末尾总带一个 `\n`
+    （用户回车留下的空行也在里面），原样塞进剪贴板，粘到目标位置会多一个空行。
+    `codeText()` 里 `replace(/\n+$/, '')`，和 Markdown 导出（`md.js`）保持同一套规则。
+
+74. **"移开就收起"要留 200ms 缓冲。** 从代码块挪到按钮上那一瞬间会先收到
+    "离开块"的 mousemove，立刻隐藏的话按钮根本点不到。做法是 200ms 的
+    `setTimeout`，鼠标一进入按钮就 `clearTimeout`。按住鼠标（拖选文字）时一律
+    不显示，免得挡住选区。

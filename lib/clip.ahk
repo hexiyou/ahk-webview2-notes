@@ -25,6 +25,20 @@
 ; ============================================================================
 
 class Clip {
+    /* 把一段文字放进剪贴板。页面里的文字换行都是 LF，而 Windows 侧只认
+       CRLF 的老程序还不少（记事本、一部分编辑器、某些国产办公软件）——
+       直接把 LF 塞进去，粘出来会挤成一行。
+       ★ AHK 的 A_Clipboard 赋值**不会**自动转换（实测：写 "a`nb" 进去，
+         读回来长度还是 3、没有 CR），所以这里显式换一次。
+       正则用 "\r?\n" 而不是裸 "\n"：已经带 CR 的输入（比如复制别处来的
+       文本）不会被换成 "\r\r\n"。 */
+    static SetText(text) {
+        if (text = "")
+            return false
+        A_Clipboard := RegExReplace(text, "\r?\n", "`r`n")
+        return true
+    }
+
     /* 把本地图片写进剪贴板。成功 true，失败 false（调用方负责提示）。 */
     static SetImageFile(path) {
         if (path = "" || !FileExist(path))

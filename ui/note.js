@@ -193,6 +193,7 @@
 
   function setMode(mode) {
     if (mode === state.mode) return;
+    hideCodeCopy();     // 换模式时正文 DOM 整批换掉，手里那块 <pre> 已经作废
     if (mode === 'md') {
       const md = MD.toMarkdown(editor.innerHTML);
       source.value = md;
@@ -292,6 +293,7 @@
      「代码语言」子菜单。 */
   document.addEventListener('contextmenu', e => {
     e.preventDefault();
+    hideCodeCopy();       // 弹菜单时那个小按钮让路，菜单本身就有「复制这段代码」
 
     /* 大图预览开着：不管点是遮罩还是图本身，都是"这张图"的菜单。
        要在下面的 zoneOf 之前判 —— 遮罩不在 editor 里，会被判成 zone=note，
@@ -317,6 +319,11 @@
     if (state.mode === 'rich') {
       const pre = closestPre(e.target);
       if (pre) { inPre = 1; lang = CodeHL.detect(pre); }
+      /* 记下这一块：菜单点下去时光标可能已经不在块里了（右键不一定移动
+         插入符），「复制这段代码」只能靠这份引用。 */
+      ctxPre = pre;
+    } else {
+      ctxPre = null;
     }
     send({ type: 'menu', id: state.id, zone: zoneOf(e.target), inpre: inPre, lang: lang });
   });
@@ -963,6 +970,149 @@
     hint('代码语言：' + CodeHL.labelOf(lang || 'text'));
   }
 
+  /* ---- 代码块右上角的「复制」按钮 ---------------------------------------
+     参考博客里着色器的常见做法：鼠标移到代码块上，右上角浮出一个小按钮，
+     点一下就把整块代码送进剪贴板。
+
+     ★ 按钮既不能放进 <pre>，也不能放进 #editor：
+       放进 <pre>    —— CodeHL.paint() 是直接换 innerHTML，按钮会被整块冲掉；
+                        textOf() 还会把按钮上"复制"两个字算进代码里。
+       放进 #editor  —— snapshot() 取的就是 editor.innerHTML，按钮会被当成
+                        正文存进库，重新打开凭空多出一个按钮。
+     所以它是 body 下的独立节点，position: fixed，靠 getBoundingClientRect()
+     跟着代码块的位置走。不在文档流里，开关的时候文字不跳、光标也不动。
+     （图片预览的遮罩 .lightbox 是同一个理由。） */
+  const codeCopy = $('codeCopy');
+  const codeCopyText = $('codeCopyText');
+  let copyPre = null;           // 按钮当前对应哪一块 <pre>
+  let copyHideTimer = 0;        // "鼠标离开后过一会儿再收"的定时器
+  let copyOkTimer = 0;          // "已复制"回执的复位定时器
+  let hoveringEditor = false;
+  let ctxPre = null;            // 最近一次右键落的代码块（编辑菜单「复制这段代码」用）
+
+  /* 代码块的纯文本。末尾那个换行是 <pre> 的排版产物（块尾总带一个 \n），
+     复制出去会在粘贴处多一个空行 —— 和 Markdown 导出削掉它（md.js 里
+     replace(/\n+$/,'')）保持一致。 */
+  function codeText(pre) {
+    return CodeHL.textOf(pre).replace(/\n+$/, '');
+  }
+
+  function resetCodeCopy() {
+    clearTimeout(copyOkTimer);
+    copyOkTimer = 0;
+    codeCopy.classList.remove('ok');
+    codeCopyText.textContent = '复制';
+  }
+
+  /* 把按钮摆到代码块右上角。返回 false 表示这块已经不在可见范围里了。 */
+  function placeCodeCopy() {
+    if (!copyPre || !copyPre.isConnected) return false;
+    const ed = editor.getBoundingClientRect();
+    const r = copyPre.getBoundingClientRect();
+    /* 块整个滚出编辑区就收起；只露一半时把按钮压在可见区域顶端 ——
+       "这块看得见却复制不了"比"按钮贴边走"更让人恼火。 */
+    if (r.bottom < ed.top + 6 || r.top > ed.bottom - 6) return false;
+    const w = codeCopy.offsetWidth || 56, h = codeCopy.offsetHeight || 21;
+    let top = Math.min(Math.max(r.top + 4, ed.top + 2), ed.bottom - h - 2);
+    let left = Math.min(r.right - w - 6, ed.left + editor.clientWidth - w - 2);
+    left = Math.max(left, ed.left + 2);
+    codeCopy.style.top = Math.round(top) + 'px';
+    codeCopy.style.left = Math.round(left) + 'px';
+    return true;
+  }
+
+  function showCodeCopy(pre) {
+    if (!richOn() || !pre || !pre.isConnected) { hideCodeCopy(); return false; }
+    if (pre !== copyPre) resetCodeCopy();
+    copyPre = pre;
+    clearTimeout(copyHideTimer);
+    copyHideTimer = 0;
+    /* ★ 先显示再量尺寸：display:none 的元素 offsetWidth 是 0，那样每次都会
+       落到兜底的 56px，窄便签里按钮就会顶到右边框外面（实测偏 6px）。 */
+    codeCopy.hidden = false;
+    if (!placeCodeCopy()) { codeCopy.hidden = true; return false; }
+    return true;
+  }
+
+  function hideCodeCopy() {
+    clearTimeout(copyHideTimer);
+    copyHideTimer = 0;
+    codeCopy.hidden = true;
+    copyPre = null;
+    hoveringEditor = false;
+  }
+
+  /* 鼠标离开代码块后不立刻收：从块里移到按钮上那一瞬间会先收到"离开"，
+     马上隐藏的话按钮根本点不到。留 200ms 缓冲。 */
+  function hideCodeCopySoon() {
+    if (codeCopy.hidden) { copyPre = null; return; }
+    clearTimeout(copyHideTimer);
+    copyHideTimer = setTimeout(hideCodeCopy, 200);
+  }
+
+  function copyCodeBlock(pre) {
+    if (!pre || !pre.isConnected) { hint('代码块已经不在了'); return ''; }
+    const text = codeText(pre);
+    if (!text) { hint('这段代码是空的'); return ''; }
+    /* 剪贴板交给宿主写：页面这边虽然算真用户手势，但宿主那一份实现会把
+       换行统一成 CRLF —— 记事本之类只认 CRLF 的老程序才不会把整段代码
+       挤成一行。见 note-window.ahk 的 clipboard-set / lib\clip.ahk。 */
+    send({ type: 'clipboard-set', text: text });
+    return text;
+  }
+
+  function reportCopied(text) {
+    const lines = text.split('\n').length;
+    hint(lines > 1 ? '已复制 ' + lines + ' 行代码' : '已复制代码');
+  }
+
+  /* mousedown 的默认行为会把焦点和光标挪走 —— 代码块里的选区、
+     正在编辑的位置就都没了。拦下来，复制完还能接着往下敲。 */
+  codeCopy.addEventListener('mousedown', e => e.preventDefault());
+
+  codeCopy.addEventListener('mouseenter', () => {
+    if (copyHideTimer) { clearTimeout(copyHideTimer); copyHideTimer = 0; }
+  });
+
+  codeCopy.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const pre = (copyPre && copyPre.isConnected) ? copyPre : null;
+    const text = copyCodeBlock(pre);
+    if (!text) return;
+    resetCodeCopy();
+    codeCopy.classList.add('ok');
+    codeCopyText.textContent = '已复制';
+    copyOkTimer = setTimeout(resetCodeCopy, 1200);
+    reportCopied(text);
+  });
+
+  /* 用 mousemove 而不是 pre 上的 mouseenter：代码块随时会被着色重绘
+     （innerHTML 整个换掉），绑在块上的监听器跟着一起消失。挂在 document
+     上，靠 target 反查是哪一块，重绘多少次都不受影响。
+     按住鼠标（拖选文字）时一律不显示，免得挡住选区。 */
+  document.addEventListener('mousemove', e => {
+    if (e.buttons) { hideCodeCopy(); return; }
+    if (e.target === codeCopy || codeCopy.contains(e.target)) return;
+    hoveringEditor = (e.target === editor || editor.contains(e.target));
+    const pre = richOn() ? closestPre(e.target) : null;
+    if (pre) {
+      if (codeCopy.hidden || pre !== copyPre) showCodeCopy(pre);
+      return;
+    }
+    hoveringEditor = false;
+    hideCodeCopySoon();
+  });
+
+  /* 滚轮/拖动滚动条之后按钮要跟着走；块滚出视野就收起来。 */
+  editor.addEventListener('scroll', () => {
+    if (!copyPre || codeCopy.hidden) return;
+    if (!hoveringEditor || !placeCodeCopy()) codeCopy.hidden = true;
+  }, { passive: true });
+
+  window.addEventListener('resize', hideCodeCopy);
+  document.documentElement.addEventListener('mouseleave', hideCodeCopy);
+
   /* ---- 编辑菜单的命令 ---------------------------------------------------
      菜单由宿主画（系统原生），点哪一项就 postMessage 回来一条 cmd。
      剪切/复制走宿主的 A_Clipboard 而不是 navigator.clipboard：原生菜单点下去
@@ -1050,6 +1200,13 @@
       case 'codelang':
         setCodeLang((msg && msg.lang) || '');
         break;
+      /* 编辑菜单的「复制这段代码」。按钮在页面里、菜单在宿主侧，两条入口
+         共用同一份复制逻辑（copyCodeBlock），免得改一处漏一处。 */
+      case 'copy-code': {
+        const t = copyCodeBlock(ctxPre);
+        if (t) reportCopied(t);
+        break;
+      }
       case 'insert-image':
         send({ type: 'pick-image-req' });
         break;
@@ -1088,6 +1245,7 @@
     if (!img) return;
     const src = img.getAttribute('src');
     if (!src) return;
+    hideCodeCopy();                 // 大图遮罩一开，代码块的复制按钮就该让路
     lightboxFor = img;
     lightboxImg.setAttribute('src', src);
     lightboxImg.alt = img.alt || '';

@@ -238,10 +238,12 @@ class NoteWindow {
                     ; 拖拽/粘贴进来的图：base64 解码 + 落盘，别占着 COM 回调线程
                     SetTimer(NoteImageTick(this.id, raw), -10)
                 case "clipboard-set":
-                    ; 编辑菜单的"复制/剪切"：页面把选中文字发过来，由这里写剪贴板。
-                    ; 页面自己调 navigator.clipboard 会被拒 —— 点原生菜单的那一刻
-                    ; 页面已经没有用户手势了。
-                    try A_Clipboard := JsonStr(raw, "text")
+                    ; 编辑菜单的"复制/剪切"、代码块右上角的"复制"：页面把文字发过来，
+                    ; 由这里写剪贴板。页面自己调 navigator.clipboard 会被拒 —— 点原生
+                    ; 菜单的那一刻页面已经没有用户手势了。
+                    ; 走 Clip.SetText 而不是直接赋值：它会把 LF 换成 CRLF，
+                    ; 否则记事本这类只认 CRLF 的程序会把多行代码挤成一行。
+                    Clip.SetText(JsonStr(raw, "text"))
                 case "paste-key":
                     ; 编辑菜单的"粘贴"：读剪贴板必须靠真实按键，只能代按一次 Ctrl+V
                     SetTimer(ObjBindMethod(this, "PasteKey"), -10)
@@ -654,10 +656,11 @@ class NoteWindow {
         m.Add("全选`tCtrl+A", NoteWindow.MB(ObjBindMethod(this, "Cmd", "select-all")))
         m.Add("清除格式", NoteWindow.MB(ObjBindMethod(this, "Cmd", "clear-format")))
         m.Add()
-        m.Add("插入代码块", NoteWindow.MB(ObjBindMethod(this, "Cmd", "codeblock")))
-        /* 只有光标确实在代码块里才露出「代码语言」：平时不占地方，
-           要用的时候就在手边。勾选状态来自页面传来的当前语言。 */
+        /* 只有光标确实在代码块里才露出这三项：平时不占地方，要用的时候就在手边。
+           「复制这段代码」是右上角那个悬浮按钮的备胎 —— 鼠标没停在块上、或者
+           块很长按钮被滚走了的时候，右键也得能整段复制。两条入口同一个 cmd。 */
         if (this.menuInPre) {
+            m.Add("复制这段代码", NoteWindow.MB(ObjBindMethod(this, "Cmd", "copy-code")))
             sub := Menu()
             for lang, label in NoteWindow.CodeLangs() {
                 sub.Add(label, NoteWindow.MB(ObjBindMethod(this, "Cmd", "codelang", lang)))
@@ -666,6 +669,7 @@ class NoteWindow {
             }
             m.Add("代码语言", sub)
         }
+        m.Add("插入代码块", NoteWindow.MB(ObjBindMethod(this, "Cmd", "codeblock")))
         m.Add("插入图片…", NoteWindow.MB(ObjBindMethod(this, "PickImage")))
         m.Add()
         m.Add("保存`tCtrl+S", NoteWindow.MB(ObjBindMethod(this, "Cmd", "save")))
