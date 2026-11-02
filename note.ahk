@@ -1048,6 +1048,23 @@ SelfTestList() {
     open := ListWindow.IsOpen()
     App.Log("SELFTEST 调 NoteDeferList 后：列表开着=" open)
 
+    /* 拖边框改尺寸：WebView2 的 controller 不会自己跟着父窗口长，全靠 Gui 的
+       Size 事件里补一次 Fill()。判据看页面自己的 clientWidth —— 窗口变大而
+       controller 没跟上时，页面根本不知道，viewport 不会动。 */
+    resized := 0
+    if ListWindow.Win {
+        r := Win.Rect(ListWindow.Win.gui.Hwnd)
+        cw0 := App.EvalNum(ListWindow.Win, "document.documentElement.clientWidth")
+        WinMove(r.x, r.y, r.w + 160, r.h + 80, "ahk_id " ListWindow.Win.gui.Hwnd)
+        Sleep 500
+        cw1 := App.EvalNum(ListWindow.Win, "document.documentElement.clientWidth")
+        WinMove(r.x, r.y, r.w, r.h, "ahk_id " ListWindow.Win.gui.Hwnd)
+        Sleep 500
+        cw2 := App.EvalNum(ListWindow.Win, "document.documentElement.clientWidth")
+        App.Log("SELFTEST 列表重铺 viewport：" cw0 " -> " cw1 " -> " cw2)
+        resized := (cw1 > cw0 + 100 && cw2 < cw1 - 100)
+    }
+
     before := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
     App.SetFontSize(before + 1)
     Sleep 700
@@ -1057,7 +1074,7 @@ SelfTestList() {
     Sleep 700
     back := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
     App.Log("SELFTEST 字号已恢复为 " back)
-    App.Log("SELFTEST 结论：" (open && got = before + 1 && back = before ? "通过" : "未通过"))
+    App.Log("SELFTEST 结论：" (open && resized && got = before + 1 && back = before ? "通过" : "未通过"))
     SelfTestDone()
 }
 
@@ -1499,6 +1516,19 @@ SelfTestSettingsRun() {
     chipHex := JStr(RichEval(w, "(function(){var c=document.querySelector('#swatches .chip');"
         . "return c?c.style.background:'-'})()"))
     RichSay("色块用的是宿主给的色值（rgb 形式）", InStr(chipHex, "rgb") > 0, chipHex)
+
+    /* 拖边框改尺寸：不接 Gui 的 Size 事件时，窗口拉大了页面还停在原尺寸，
+       右边一大片空白（用户报的就是这个）。看页面自己的 clientWidth 才算数。 */
+    rs := Win.Rect(w.gui.Hwnd)
+    vw0 := App.EvalNum(w, "document.documentElement.clientWidth")
+    WinMove(rs.x, rs.y, rs.w + 140, rs.h + 60, "ahk_id " w.gui.Hwnd)
+    Sleep 500
+    vw1 := App.EvalNum(w, "document.documentElement.clientWidth")
+    WinMove(rs.x, rs.y, rs.w, rs.h, "ahk_id " w.gui.Hwnd)
+    Sleep 500
+    vw2 := App.EvalNum(w, "document.documentElement.clientWidth")
+    RichSay("拖大窗口后页面跟着重铺", vw1 > vw0 + 100 && vw2 < vw1 - 100,
+        vw0 " -> " vw1 " -> " vw2)
 
     ; 非法热键：应当报错，且配置不被改坏
     badRaw := '{"type":"save","fontSize":19,"transparent":1,"showAllOnStart":0,'

@@ -50,6 +50,13 @@ class ListWindow {
         g.BackColor := "0xFFFDF8EE"
         g.OnEvent("Close", (*) => ListWindow.Close())
         g.OnEvent("Escape", (*) => ListWindow.Close())
+        /* ★ 拖边框改大小必须接 Size：WebView2 的 controller 不会跟着父窗口长大
+           （它只认 put_Bounds，也就是 Fill() 那一下）。不接这个事件的表现是
+           "窗口拉大了，内容还停在原来的尺寸，右边一大片空白"。
+           这里直接 Fill 而不是转给 SetTimer：用户拖边框时系统在模态的
+           WM_SIZING 循环里排队派发消息，脚本自己的消息循环不转，定时器不一定
+           跟得上；而这个回调本身就在窗口过程里，正好赶在重画之前。 */
+        g.OnEvent("Size", ListOnSize)
 
         ; 工作区可能是 0（远程/无显示器），Min 之后会变成负数，Gui.Show 直接抛错，
         ; 所以这里既要有上限也要有下限
@@ -101,6 +108,14 @@ class ListWindow {
             ListWindow.Win.wvc.Fill()
             ListWindow.Win.wvc.IsVisible := 1
         }
+    }
+
+    ; 窗口尺寸变了：让 controller 重新对齐客户区。最小化时客户区是 0，
+    ; 铺上去等于把页面压成一条，还原时会闪一下，所以不理。
+    static OnSize(minMax) {
+        if (minMax = -1)
+            return
+        ListWindow.Refill()
     }
 
     /* 切换列表窗口的置顶。窗口不在也照样记下偏好（下次打开就是置顶的），
@@ -344,6 +359,9 @@ class ListWindow {
 ; ---- 顶层包装（COM 事件 / SetTimer 用） ----------------------------------
 ListOnMessage(sender, args) => ListWindow.OnMessage(sender, args)
 ListRefill() => ListWindow.Refill()
+; Gui 的 Size 事件回调带三个参数（GuiObj, MinMax, Width, Height），
+; 参数个数写少一个都会抛 "Too many parameters"
+ListOnSize(g, minMax, w, h) => ListWindow.OnSize(minMax)
 
 ; ---- 菜单回调 ------------------------------------------------------------
 ; 每个函数返回一个"零参闭包"，由 ListWindow.Cb 再包一层变参箭头。

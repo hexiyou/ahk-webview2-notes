@@ -402,7 +402,8 @@ runtime\AutoHotkey64.exe note.ahk --selftest-menu
 # 程序级自检：Ctrl+N 链路（热键注册 + 条件判定 + 延迟建窗不卡死）
 runtime\AutoHotkey64.exe note.ahk --selftest-keys
 
-# 程序级自检：延迟入口能不能真的把列表打开（回归"点菜单没反应"）
+# 程序级自检：延迟入口能不能真的把列表打开（回归"点菜单没反应"）+
+#              拖边框改窗口大小后页面有没有跟着重铺
 runtime\AutoHotkey64.exe note.ahk --selftest-list
 
 # 程序级自检：Ctrl+滚轮 字号（合成 WheelEvent，验放大/上下限/落盘）
@@ -421,7 +422,8 @@ runtime\AutoHotkey64.exe note.ahk --selftest-edit
 # 程序级自检：四种导出格式（TXT / MD / HTML / RTF）
 runtime\AutoHotkey64.exe note.ahk --selftest-export
 
-# 程序级自检：设置面板（开窗 + 读值 + 颜色色块 + 保存生效 + 非法热键拦截）
+# 程序级自检：设置面板（开窗 + 读值 + 颜色色块 + 拖大窗口重铺 +
+#              保存生效 + 非法热键拦截）
 runtime\AutoHotkey64.exe note.ahk --selftest-settings
 
 # 程序级自检：重命名框（置顶/普通两版 + 置顶便签的端到端）
@@ -838,3 +840,15 @@ pwsh -File tools/make-icon.ps1
     窗口样式再回 `{type:'topmost'}` 点亮按钮 —— 页面不自己翻 class，就不会出现
     "按钮亮着但其实没置顶"。开窗时也要**在建窗前**决定（`Gui` 的 `+AlwaysOnTop`
     只能创建时给），否则会看到闪一下。
+
+57. **`+Resize` 的窗口，网页内容不会自己跟着长大。** 列表窗口和设置面板都是"普通 Gui +
+    WebView2"，而 controller 的尺寸**只由 `Fill()` 决定**（内部 `GetClientRect` +
+    `put_Bounds`）—— Windows 不会替你转告 WebView2。没接 `Gui.OnEvent("Size", ...)`
+    时的表现就是"窗口拉大了，内容还停在原来的尺寸，右边一大片空白"（用户报的正是这个）。
+    补法是 `g.OnEvent("Size", ListOnSize)`，回调里判一下 `minMax = -1`（最小化时客户区是 0，
+    铺上去等于把页面压成一条，还原时会闪），再 `wvc.Fill()`。
+    这里**直接 Fill，不要转给 `SetTimer`**：用户拖边框时系统在模态的 `WM_SIZING` 循环里
+    排队派发消息，脚本自己的消息循环不转，定时器会被推迟到松手之后；Size 回调本身就在
+    窗口过程里，最及时。
+    自检判据要看**页面自己的 `document.documentElement.clientWidth`**，不能只看窗口宽度：
+    controller 没跟上时，窗口明明变宽了而页面一无所知，viewport 一点没动，只有这个断言抓得住。

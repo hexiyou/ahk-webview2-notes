@@ -41,6 +41,8 @@ class SettingsWindow {
         g.BackColor := "0xFFFDF8EE"
         g.OnEvent("Close", (*) => SettingsWindow.Close())
         g.OnEvent("Escape", (*) => SettingsWindow.Close())
+        ; 同列表窗口：不接 Size，拖大窗口后页面还停在原尺寸（右边一片空白）
+        g.OnEvent("Size", SettingsOnSize)
 
         wa := Win.WorkArea()
         w := Max(420, Min(520, wa.w - 60))
@@ -93,6 +95,12 @@ class SettingsWindow {
             SettingsWindow.Win.wvc.Fill()
             SettingsWindow.Win.wvc.IsVisible := 1
         }
+    }
+
+    static OnSize(minMax) {
+        if (minMax = -1)
+            return
+        SettingsWindow.Refill()
     }
 
     static StartMove() {
@@ -192,6 +200,10 @@ SettingsOnMessage(sender, args) {
 
 SettingsRefill() {
     SettingsWindow.Refill()
+}
+
+SettingsOnSize(g, minMax, w, h) {
+    SettingsWindow.OnSize(minMax)
 }
 
 ; 闭包捕获这一条原始消息，跑在 SetTimer 起的独立线程里
