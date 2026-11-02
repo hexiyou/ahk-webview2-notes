@@ -36,11 +36,15 @@ class NoteWindow {
        否则下次开机会一张满屏便签糊在桌面上。 */
     maximized := false
     restGeo := ""
-    /* 右键菜单的两套。zone 由页面按落点决定：正文里弹"编辑菜单"，
-       其它地方弹"便签菜单"。inpre/lang 只在正文落在代码块里时才有值。 */
+    /* 右键菜单的三套。zone 由页面按落点决定：正文文字弹"编辑菜单"，
+       图片弹"图片菜单"，其它地方弹"便签菜单"。inpre/lang 只在正文落在
+       代码块里时才有值，src 只在 zone=image 时才有值。 */
     menuZone := "note"
     menuInPre := 0
     menuLang := ""
+    /* 图片菜单要操作的那张图（页面给的是 img 的原始 src，file:/// 或 data: ）。
+       右键大图预览和右键正文里的缩略图都会填它。 */
+    menuImage := ""
     /* 这张窗口到底是不是分层窗口（WS_EX_LAYERED）。opacity < 100 时必须分层，
        否则页面透明度没地方透 —— 普通窗口底下是窗口底色，透出来是那块颜色，
        不是桌面。见 App.SetNoteOpacity 里的重建分支。 */
@@ -220,7 +224,13 @@ class NoteWindow {
                     this.menuZone := JsonStr(raw, "zone", "note")
                     this.menuInPre := JsonNum(raw, "inpre")
                     this.menuLang := JsonStr(raw, "lang")
+                    if (this.menuZone = "image")
+                        this.menuImage := JsonStr(raw, "src")
                     SetTimer(ObjBindMethod(this, "ShowMenu"), -10)
+                case "copy-image":
+                    ; 大图预览里按 Ctrl+C：和菜单「复制图片」同一条路
+                    this.menuImage := JsonStr(raw, "src")
+                    SetTimer(ObjBindMethod(this, "CopyImage"), -10)
                 case "font":
                     ; Ctrl+滚轮：页面先自己应用了字号，这里只负责落盘 + 通知其它窗口
                     App.SetFontSize(JsonNum(raw, "size"))
@@ -547,10 +557,15 @@ class NoteWindow {
     }
 
     ShowMenu() {
-        /* 两套菜单。页面按落点给 zone：
+        /* 三套菜单。页面按落点给 zone：
              标题栏 / 工具栏 / 底栏 → note  这张便签怎么处理
              正文编辑区            → edit  这段文字怎么编辑
+             图片（大图预览 / 正文里的图）→ image  这张图怎么处理
            在正文里右键却弹出"删除这张便签"是最容易误点的组合，所以必须分开。 */
+        if (this.menuZone = "image") {
+            this.ShowImageMenu()
+            return
+        }
         if (this.menuZone = "edit") {
             this.ShowEditMenu()
             return
@@ -655,6 +670,105 @@ class NoteWindow {
         m.Add()
         m.Add("保存`tCtrl+S", NoteWindow.MB(ObjBindMethod(this, "Cmd", "save")))
         m.Show()
+    }
+
+    /* ---- 图片菜单 ---------------------------------------------------------
+       两个入口共用一套：点开大图预览后右键，或直接对着正文里的缩略图右键。
+       （后者顺带补上了"图片选中不了、删不掉"这个老毛病 —— 点图片会打开预览，
+       在正文里根本抓不到它。）
+
+       ★ 剪贴板只能由宿主写：原生菜单一点，页面就没有用户手势了，
+         navigator.clipboard 会被 Chromium 拒掉。见 lib\clip.ahk。 */
+    ShowImageMenu() {
+        path := NoteWindow.ImageLocalPath(this.menuImage)
+        has := (path != "" && FileExist(path))
+        m := Menu()
+        m.Add("复制图片`tCtrl+C", NoteWindow.MB(ObjBindMethod(this, "CopyImage")))
+        m.Add("另存为…", NoteWindow.MB(ObjBindMethod(this, "SaveImageAs")))
+        m.Add()
+        m.Add("复制文件路径", NoteWindow.MB(ObjBindMethod(this, "CopyImagePath")))
+        m.Add("在文件夹中显示", NoteWindow.MB(ObjBindMethod(this, "RevealImage")))
+        m.Add()
+        m.Add("从正文中删除这张图", NoteWindow.MB(ObjBindMethod(this, "DeleteImage")))
+        /* 文件真找不到了（数据目录被搬走、图片被手删）就把前四项灰掉：
+           点下去只弹一句"找不到"比直接看见是灰的还让人困惑。 */
+        if !has {
+            try {
+                m.Disable("复制图片")
+                m.Disable("另存为…")
+                m.Disable("复制文件路径")
+                m.Disable("在文件夹中显示")
+            }
+        }
+        m.Show()
+    }
+
+    CopyImage() {
+        path := NoteWindow.ImageLocalPath(this.menuImage)
+        if (path = "" || !FileExist(path)) {
+            this.Hint("这张图的文件找不到了")
+            return
+        }
+        if Clip.SetImageFile(path) {
+            this.Hint("图片已复制，去别的软件里 Ctrl+V 试试")
+        } else {
+            SplitPath path, , , &ext
+            this.Hint("这个格式复制不了（." ext "），用「另存为」吧")
+        }
+    }
+
+    /* 另存为：系统保存框 + 文件复制。不做格式转换 —— 原样拷一份，
+       保真且不依赖任何解码器（webp 也照样能存）。 */
+    SaveImageAs() {
+        path := NoteWindow.ImageLocalPath(this.menuImage)
+        if (path = "" || !FileExist(path)) {
+            this.Hint("这张图的文件找不到了")
+            return
+        }
+        SplitPath path, &name, , &ext
+        f := FileSelect("S", A_Desktop "\" name "." ext, "图片另存为"
+            , "图片 (*." ext ";*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp)")
+        if (f = "")
+            return
+        dst := NoteWindow.CopyImageFile(path, f)
+        if (dst = "") {
+            this.Hint("保存失败（那个位置可能不可写）")
+            return
+        }
+        SplitPath dst, &saved
+        this.Hint("已另存为 " saved)
+    }
+
+    CopyImagePath() {
+        path := NoteWindow.ImageLocalPath(this.menuImage)
+        if (path = "" || !FileExist(path)) {
+            this.Hint("这张图的文件找不到了")
+            return
+        }
+        A_Clipboard := path
+        this.Hint("路径已复制")
+    }
+
+    RevealImage() {
+        path := NoteWindow.ImageLocalPath(this.menuImage)
+        if (path = "" || !FileExist(path)) {
+            this.Hint("这张图的文件找不到了")
+            return
+        }
+        try Run('explorer.exe /select,"' path '"')
+    }
+
+    /* 删除交给页面：只有它手里有 DOM 元素，而且能用 execCommand('delete') 删，
+       这样 Ctrl+Z 还撤得回来。图片文件本身不删 —— 同一条便签里可能引用了两次，
+       别的便签也可能粘过同一个链接。 */
+    DeleteImage() {
+        this.Cmd("delete-image")
+    }
+
+    /* 在状态栏显示一句话（页面的 hint）。比 TrayTip 好：气泡会被置顶窗口盖住，
+       而且用户正在盯着这张便签，反馈就该出现在便签里。 */
+    Hint(text, ok := true) {
+        this.Send('{"type":"hint","text":' JsonQuote(text) ',"ok":' (ok ? 1 : 0) '}')
     }
 
     /* 给页面下发一条编辑命令。看名字就知道干什么，页面那边 runCmd 一一对应。 */
@@ -844,6 +958,80 @@ class NoteWindow {
 
     static FileUrl(p) {
         return "file:///" StrReplace(StrReplace(p, "\", "/"), " ", "%20")
+    }
+
+    /* 把页面给的 src 还原成本地文件路径。三种情况：
+         file:///…   —— 就是 data\images 下的图，换回反斜杠、把 %20 解回空格
+         data:…      —— 早期或外部塞进来的内嵌图，解出来落到 images 目录
+         http(s) 等  —— 网络图片，便签不缓存，返回空（调用方提示"找不到"） */
+    static ImageLocalPath(src) {
+        src := Trim(src)
+        if (src = "")
+            return ""
+        if (SubStr(src, 1, 5) = "data:")
+            return NoteWindow.WriteDataUrl(src)
+        return NoteWindow.UrlToPath(src)
+    }
+
+    /* file:/// URL -> 本地路径。
+       ★ 别用 shlwapi 的 PathCreateFromUrlW：它对 %E5%9B%BE 这种 UTF-8 序列
+       按**单字节**摊开，结果是 "å¾"（probe-menu 实测抓到），中文文件名当场
+       变乱码。这里自己解：%XX 收成字节、普通字符按 UTF-8 写进去，最后整体
+       按 UTF-8 读出来 —— 中文、%20 都对得上。 */
+    static UrlToPath(url) {
+        if (SubStr(url, 1, 8) != "file:///")
+            return ""
+        ; 先换分隔符再解码：%2F 那种编码过的斜杠保持原样（Windows 也认）
+        return NoteWindow.UrlDecode(StrReplace(SubStr(url, 9), "/", "\"))
+    }
+
+    /* 只解 %XX。绝大多数路径里没有 %，那就不进循环（省得逐字符处理一遍）。 */
+    static UrlDecode(s) {
+        if !InStr(s, "%")
+            return s
+        n := StrLen(s)
+        buf := Buffer(n * 4 + 8, 0)
+        k := 0
+        i := 1
+        while (i <= n) {
+            ch := SubStr(s, i, 1)
+            if (ch = "%" && i + 2 <= n) {
+                hex := SubStr(s, i + 1, 2)
+                if RegExMatch(hex, "^[0-9A-Fa-f]{2}$") {
+                    NumPut("uchar", Integer("0x" hex), buf, k)
+                    k += 1
+                    i += 3
+                    continue
+                }
+            }
+            one := Buffer(4, 0)
+            len := StrPut(ch, one, "UTF-8") - 1     ; 返回值含结尾 0
+            if (len > 0 && (k + len) < (n * 4 + 8)) {
+                DllCall("RtlMoveMemory", "ptr", buf.Ptr + k, "ptr", one, "uptr", len)
+                k += len
+            }
+            i += 1
+        }
+        if (k = 0)
+            return ""
+        return StrGet(buf, "UTF-8")
+    }
+
+    /* 另存为的真正动作（拆出来是为了能被自检直接调，不必弹模态对话框）。
+       用户没写扩展名就按源文件的补上；返回最终路径，失败返回空串。 */
+    static CopyImageFile(src, dst) {
+        if (dst = "" || !FileExist(src))
+            return ""
+        SplitPath dst, , , &dext
+        if (dext = "") {
+            SplitPath src, , , &sext
+            if (sext != "")
+                dst .= "." sext
+        }
+        try FileCopy src, dst, 1
+        catch
+            return ""
+        return FileExist(dst) ? dst : ""
     }
 
     /* ---- 图片落盘 -----------------------------------------------------------

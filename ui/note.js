@@ -64,6 +64,10 @@
         case 'cmd': runCmd(msg.name, msg); break;
         case 'max': setMaxed(msg.on); break;
         case 'toast': hint(msg.text || ''); break;
+        /* 宿主那边执行完图片操作（复制/另存/路径）后的回执。
+           走状态栏而不是系统托盘气泡：气泡会被置顶的便签盖住，而且用户
+           正在盯着这张便签，反馈就该出现在它自己身上。 */
+        case 'hint': hint(msg.text || '', !!msg.ok); break;
       }
     });
   }
@@ -278,15 +282,37 @@
      180×140，页面内的菜单根本放不下九项，原生菜单才能超出窗口边界。
      AreDefaultContextMenusEnabled 已经在宿主侧关掉了，所以不会打架。
 
-     ★ 两套菜单，按落点分：
+     ★ 三套菜单，按落点分：
        标题栏 / 工具栏 / 状态栏 → zone=note   便签操作（置顶、颜色、导出、删除…）
        正文编辑区              → zone=edit   编辑命令（撤销、复制、粘贴、全选…）
+       图片（大图预览、正文缩略图）→ zone=image  复制图片 / 另存为 / 删除这张图
      正文里右键弹出"删除这张便签"是很容易误点的组合，所以必须分开。
 
      右键落在代码块里时额外带 inpre + 当前语言，宿主据此决定要不要露出
      「代码语言」子菜单。 */
   document.addEventListener('contextmenu', e => {
     e.preventDefault();
+
+    /* 大图预览开着：不管点是遮罩还是图本身，都是"这张图"的菜单。
+       要在下面的 zoneOf 之前判 —— 遮罩不在 editor 里，会被判成 zone=note，
+       于是右键一张图却弹出"删除这张便签"。 */
+    if (!lightbox.hidden) {
+      ctxImg = lightboxFor;
+      send({ type: 'menu', id: state.id, zone: 'image', src: lightboxImg.getAttribute('src') || '' });
+      return;
+    }
+
+    /* 正文里对着缩略图右键，也是图片菜单。顺带把"图片删不掉"这条老路补上：
+       点图片会打开预览，正文里根本选不中它，只能靠这个菜单删。 */
+    if (state.mode === 'rich') {
+      const im = (e.target && e.target.tagName === 'IMG') ? e.target : null;
+      if (im && !im.classList.contains('pending')) {
+        ctxImg = im;
+        send({ type: 'menu', id: state.id, zone: 'image', src: im.getAttribute('src') || '' });
+        return;
+      }
+    }
+
     let inPre = 0, lang = '';
     if (state.mode === 'rich') {
       const pre = closestPre(e.target);
@@ -1033,6 +1059,11 @@
       case 'save':
         saveNow('manual');
         break;
+      /* 图片菜单的「从正文中删除这张图」。只断正文里的这一处引用，
+         文件留在 data\images 里（同一条便签/别的便签可能还引着它）。 */
+      case 'delete-image':
+        deleteImage();
+        break;
       default:
         break;
     }
@@ -1041,14 +1072,25 @@
   /* ---- 点图片看原图 -----------------------------------------------------
      正文里的图最大 180px 高（见 note.css），看不清楚；点一下用遮罩铺满窗口
      显示原图。遮罩是 fixed 定位的独立元素，不参与正文排版，所以开关的时候
-     文字不会跳动，也不会动到光标。 */
+     文字不会跳动，也不会动到光标。
+
+     两张"当前图"的引用：
+       lightboxFor —— 打开预览的那张正文图（Esc/点击关闭时还要靠它回删）
+       ctxImg      —— 最近一次右键的那张（图片菜单「从正文中删除」用它）
+     都留 DOM 引用而不是自己按 src 去查：同一条便签里同一张图可以贴两次，
+     按 src 查只能找到第一张，删错位置。 */
   const lightbox = $('lightbox');
   const lightboxImg = $('lightboxImg');
+  let lightboxFor = null;
+  let ctxImg = null;
 
-  function openLightbox(src, alt) {
+  function openLightbox(img) {
+    if (!img) return;
+    const src = img.getAttribute('src');
     if (!src) return;
-    lightboxImg.src = src;
-    lightboxImg.alt = alt || '';
+    lightboxFor = img;
+    lightboxImg.setAttribute('src', src);
+    lightboxImg.alt = img.alt || '';
     lightbox.hidden = false;
   }
 
@@ -1068,8 +1110,30 @@
     const img = e.target;
     if (!img || img.tagName !== 'IMG' || img.classList.contains('pending')) return;
     e.preventDefault();
-    openLightbox(img.getAttribute('src'), img.alt);
+    openLightbox(img);
   });
+
+  /* 从正文里删掉"当前这张图"（宿主菜单「从正文中删除这张图」调过来）。
+     走 execCommand('delete') 而不是 el.remove()：前者进浏览器的撤销栈，
+     误删还能 Ctrl+Z 找回来。图片文件本身不删 —— 可能还有别处引用，
+     也可能用户只是想把它从这段文字里挪走。 */
+  function deleteImage() {
+    const el = (ctxImg && ctxImg.isConnected) ? ctxImg
+      : (lightboxFor && lightboxFor.isConnected ? lightboxFor : null);
+    if (!el) { hint('这张图已经不在正文里了'); return; }
+    editor.focus();
+    const r = document.createRange();
+    r.selectNode(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    document.execCommand('delete', false, null);
+    closeLightbox();
+    ctxImg = null;
+    lightboxFor = null;
+    scheduleSave();
+    hint('已从正文中删除（图片文件还留着）');
+  }
 
   /* ---- 勾选框 ----------------------------------------------------------- */
 
@@ -1121,6 +1185,14 @@
 
   document.addEventListener('keydown', e => {
     const mod = e.ctrlKey || e.metaKey;
+
+    /* 看图时 Ctrl+C 就是"复制这张图"。菜单里写着 Ctrl+C，那它就得真的能用；
+       剪贴板由宿主写（原生菜单/快捷键回调时页面都没有用户手势）。 */
+    if (!lightbox.hidden && mod && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      send({ type: 'copy-image', src: lightboxImg.getAttribute('src') || '' });
+      return;
+    }
 
     /* 宿主侧为了让 Ctrl+V / Ctrl+C 正常工作，开启了 WebView2 的浏览器快捷键
        （AreBrowserAcceleratorKeysEnabled）。副作用是 F5 / Ctrl+R 会刷新页面、

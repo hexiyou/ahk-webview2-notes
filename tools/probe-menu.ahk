@@ -16,6 +16,7 @@
 #Include ..\lib\sqlite.ahk
 #Include ..\lib\store.ahk
 #Include ..\lib\win.ahk
+#Include ..\lib\clip.ahk
 #Include ..\lib\WebView2\WebView2.ahk
 #Include ..\lib\note-window.ahk
 #Include ..\lib\list-window.ahk
@@ -308,6 +309,57 @@ Check("最大化用当前显示器的工作区", InStr(srcWin, "Win.WorkAreaOf("
 Check("Win 有 WorkAreaOf", Win.HasMethod("WorkAreaOf"))
 wa := Win.WorkAreaOf(0)
 Check("WorkAreaOf(0) 退化成主屏工作区", wa.w > 200 && wa.h > 200, wa.w "x" wa.h)
+
+; ---------------------------------------------------------------------------
+; 9. 图片右键菜单：复制图片 / 另存为
+;    剪贴板那一段要真跑一遍得往剪贴板里塞东西（污染用户的剪贴板、还要 GDI+），
+;    这里只验零件齐不齐、路径往返对不对；端到端在 note.ahk --selftest-image。
+; ---------------------------------------------------------------------------
+
+Check("宿主有 ShowImageMenu", NoteWindow.Prototype.HasMethod("ShowImageMenu"))
+for m in ["CopyImage", "SaveImageAs", "CopyImagePath", "RevealImage", "DeleteImage", "Hint"]
+    Check("NoteWindow 有方法 " m, NoteWindow.Prototype.HasMethod(m))
+for m in ["ImageLocalPath", "UrlToPath", "CopyImageFile"]
+    Check("NoteWindow 有静态方法 " m, NoteWindow.HasMethod(m))
+
+hasClip := 0
+try hasClip := Clip.HasMethod("SetImageFile") ? 1 : 0
+Check("Clip 能把图片写进剪贴板", hasClip = 1)
+Check("宿主按 zone=image 分发菜单", InStr(srcWin, 'this.menuZone = "image"') > 0)
+Check("宿主收得到 copy-image（看图时 Ctrl+C）", InStr(srcWin, 'case "copy-image"') > 0)
+Check("页面有图片菜单 zone", InStr(noteJs, "zone: 'image'") > 0)
+Check("大图预览里右键先判图片（不然会落到便签菜单）"
+    , InStr(noteJs, "if (!lightbox.hidden)") > 0)
+Check("页面会发 copy-image", InStr(noteJs, "type: 'copy-image'") > 0)
+Check("页面能接住 delete-image", InStr(noteJs, "case 'delete-image':") > 0)
+
+imgProbe := A_ScriptDir "\..\data\_图片 测试.png"
+if FileExist(imgProbe)
+    FileDelete imgProbe
+FileAppend "x", imgProbe, "UTF-8-RAW"
+probeUrl := NoteWindow.FileUrl(imgProbe)
+back := NoteWindow.ImageLocalPath(probeUrl)
+Check("file:/// 还原成本地路径（中文 + 空格）", back = imgProbe, back)
+encUrl := StrReplace(probeUrl, "图片", "%E5%9B%BE%E7%89%87")
+back2 := NoteWindow.ImageLocalPath(encUrl)
+Check("百分号编码过的中文也能还原", back2 = imgProbe, back2)
+Check("网络图片不当成本地文件", NoteWindow.ImageLocalPath("https://a/b.png") = "")
+Check("空 src 返回空", NoteWindow.ImageLocalPath("") = "")
+
+saveProbe := A_ScriptDir "\..\data\_另存 测试.png"
+for f in [saveProbe, A_ScriptDir "\..\data\_另存 2"]
+    if FileExist(f)
+        FileDelete f
+saved := NoteWindow.CopyImageFile(imgProbe, saveProbe)
+Check("另存为真的把文件拷过去", saved = saveProbe && FileExist(saveProbe), saved)
+noext := A_ScriptDir "\..\data\_另存 2"
+saved2 := NoteWindow.CopyImageFile(imgProbe, noext)
+Check("另存为会自动补扩展名", saved2 = noext ".png" && FileExist(noext ".png"), saved2)
+Check("源文件不在时另存为失败而不是抛异常"
+    , NoteWindow.CopyImageFile(A_ScriptDir "\..\data\_没有这个.png", saveProbe) = "")
+for f in [imgProbe, saveProbe, noext ".png"]
+    if FileExist(f)
+        FileDelete f
 
 App.Log("=== 结束：PASS " PassN " / FAIL " FailN)
 Sleep 150

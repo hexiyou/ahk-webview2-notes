@@ -23,6 +23,7 @@
 #Include lib\store.ahk
 #Include lib\export.ahk
 #Include lib\win.ahk
+#Include lib\clip.ahk
 #Include lib\WebView2\WebView2.ahk
 #Include lib\note-window.ahk
 #Include lib\list-window.ahk
@@ -173,6 +174,8 @@ class App {
             SetTimer(SelfTestOpacity, -2500)
         if App.HasArg("--selftest-hotkey")
             SetTimer(SelfTestHotkey, -2500)
+        if App.HasArg("--selftest-image")
+            SetTimer(SelfTestImage, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -2979,6 +2982,203 @@ SelfTestEditRun() {
         if !seen.Has(A_LoopFileName)
             try FileDelete A_LoopFilePath
     }
+}
+
+/* 自检：图片的"带出去"链路 —— 复制到剪贴板 / 另存为 / 从正文删除。
+   为什么值得单独测：这条链路每一环都会**静默失败**，
+     · 剪贴板里有 CF_DIB 不代表内容对（位深/宽高写错，粘出来是一团黑或空图）
+     · file:/// 还原成本地路径，中文名和空格最容易错
+     · 另存为不补扩展名，存下去是一个没有关联程序的裸文件
+   这个自检会占用剪贴板，跑完把原来的文本剪贴板还回去。 */
+SelfTestImage() {
+    try SelfTestImageRun()
+    catch as e {
+        App.Log("SELFTEST IMAGE 抛异常：" CleanComError(e.Message) " @" e.Line)
+    }
+    SelfTestDone()
+}
+
+SelfTestImageRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    oldClip := ""
+    try oldClip := A_Clipboard
+
+    imgDir := App.DataDir "\images"
+    seen := Map()
+    Loop Files (imgDir "\*.*")
+        seen[A_LoopFileName] := 1
+
+    id := App.Store.Create(Map("title", "图片复制测试", "body_text", "x"))
+    w := App.OpenNote(id)
+    if !w {
+        App.Log("SELFTEST IMAGE 没能打开便签")
+        return
+    }
+    Loop 40 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("页面就绪", w.ready = 1, w.ready)
+
+    /* ---- 1. 造一张 320×180 的纯色图贴进正文 -------------------------------
+       走真实的粘贴链路（ClipboardEvent + File），顺便确认图片照常落盘。 */
+    RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const c = document.createElement('canvas');
+      c.width = 320; c.height = 180;
+      const g = c.getContext('2d');
+      g.fillStyle = '#c81e28';
+      g.fillRect(0, 0, 320, 180);
+      const u = c.toDataURL('image/png');
+      const b = atob(u.split(',')[1]);
+      const a = new Uint8Array(b.length);
+      for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i);
+      const dt = new DataTransfer();
+      dt.items.add(new File([a], 'red.png', { type: 'image/png' }));
+      document.body.dispatchEvent(new ClipboardEvent('paste',
+        { clipboardData: dt, bubbles: true, cancelable: true }));
+      return 1;
+    })()
+    )")
+
+    pending := "?", got := "0"
+    Loop 40 {
+        pending := JStr(RichEval(w, "document.querySelectorAll('#editor img.pending').length"))
+        got := JStr(RichEval(w, "document.querySelectorAll('#editor img').length"))
+        if (pending = "0" && got = "1")
+            break
+        Sleep 250
+    }
+    RichSay("测试图已经贴进正文", got = "1" && pending = "0", "img=" got " pending=" pending)
+
+    src := JStr(RichEval(w,
+        "(function(){var i=document.querySelector('#editor img');return i?i.getAttribute('src'):''})()"))
+    RichSay("src 是 file:/// 链接", InStr(src, "file:///") > 0, SubStr(src, 1, 90))
+
+    path := NoteWindow.ImageLocalPath(src)
+    RichSay("src 能还原成本地路径", path != "" && FileExist(path), path)
+
+    /* ---- 2. 复制到剪贴板 -------------------------------------------------- */
+    copied := 0
+    try copied := Clip.SetImageFile(path) ? 1 : 0
+    RichSay("复制图片：写剪贴板成功", copied = 1)
+    RichSay("剪贴板里出现 CF_DIB"
+        , DllCall("IsClipboardFormatAvailable", "uint", 8, "uint") ? true : false)
+
+    dibW := 0, dibH := 0, dibBits := 0, pxR := 0, pxG := 0, pxB := 0
+    if Clip.OpenClip() {
+        hData := DllCall("GetClipboardData", "uint", 8, "ptr")
+        if hData {
+            p := DllCall("GlobalLock", "ptr", hData, "ptr")
+            if p {
+                dibW := NumGet(p, 4, "int")
+                dibH := NumGet(p, 8, "int")
+                dibBits := NumGet(p, 14, "ushort")
+                /* 像素从偏移 40 开始，24 位 DIB 是 BGR 顺序。只看头不够 ——
+                   头对了但像素没拷进去，粘出来照样是一张黑图。 */
+                pxB := NumGet(p, 40, "uchar")
+                pxG := NumGet(p, 41, "uchar")
+                pxR := NumGet(p, 42, "uchar")
+            }
+            DllCall("GlobalUnlock", "ptr", hData)
+        }
+        DllCall("CloseClipboard")
+    }
+    RichSay("CF_DIB 的宽高就是原图（320×180）", dibW = 320 && dibH = 180, dibW "x" dibH)
+    RichSay("CF_DIB 是 24 位（画图/Office/微信都认）", dibBits = 24, dibBits)
+    RichSay("CF_DIB 的像素就是原图的红（#C81E28）"
+        , pxR = 200 && pxG = 30 && pxB = 40, "R" pxR " G" pxG " B" pxB)
+
+    pngFmt := DllCall("RegisterClipboardFormatW", "wstr", "PNG", "uint")
+    pngOk := pngFmt ? DllCall("IsClipboardFormatAvailable", "uint", pngFmt, "uint") : 0
+    RichSay("同时写了 PNG 格式（透明能保住）", pngOk ? true : false, "fmt=" pngFmt)
+
+    /* ---- 3. 另存为 -------------------------------------------------------- */
+    tmp := A_Temp "\qnote-img-" A_TickCount
+    saved := NoteWindow.CopyImageFile(path, tmp)
+    RichSay("另存为：没写扩展名会自动补 .png"
+        , saved = tmp ".png" && FileExist(saved), saved)
+    sameSize := 0
+    if FileExist(tmp ".png")
+        sameSize := (FileGetSize(tmp ".png") = FileGetSize(path)) ? 1 : 0
+    RichSay("另存为：文件大小和原图一致", sameSize = 1)
+    if FileExist(tmp ".png")
+        try FileDelete tmp ".png"
+
+    /* ---- 4. 页面：三套菜单的第三套 ---------------------------------------- */
+    rawCtx := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const br = window.chrome.webview;
+      const orig = br.postMessage.bind(br);
+      let last = null;
+      br.postMessage = function(m){ last = m; };
+      const img = document.querySelector('#editor img');
+      img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      br.postMessage = orig;
+      return (last && last.zone ? last.zone : '-') + '|' + (last && last.src ? 1 : 0);
+    })()
+    )")
+    ctx := JStr(rawCtx)
+    RichSay("正文里右键图片 → 图片菜单（zone=image，带 src）", ctx = "image|1", ctx)
+
+    rawLb := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const br = window.chrome.webview;
+      const orig = br.postMessage.bind(br);
+      let last = null;
+      br.postMessage = function(m){ last = m; };
+      document.querySelector('#editor img').click();
+      const box = document.getElementById('lightbox');
+      box.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      const open = box.hidden ? 0 : 1;
+      br.postMessage = orig;
+      return open + '|' + (last && last.zone ? last.zone : '-');
+    })()
+    )")
+    lb := JStr(rawLb)
+    RichSay("大图预览里右键还是图片菜单", lb = "1|image", lb)
+
+    rawCc := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const br = window.chrome.webview;
+      const orig = br.postMessage.bind(br);
+      let last = null;
+      br.postMessage = function(m){ last = m; };
+      const ev = new KeyboardEvent('keydown',
+        { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+      document.dispatchEvent(ev);
+      br.postMessage = orig;
+      return (ev.defaultPrevented ? 1 : 0) + '|' + (last && last.type ? last.type : '-');
+    })()
+    )")
+    cc := JStr(rawCc)
+    RichSay("看图时 Ctrl+C 走复制图片（菜单上写着就得真能用）", cc = "1|copy-image", cc)
+
+    /* ---- 5. 从正文删除这张图 ---------------------------------------------- */
+    w.Cmd("delete-image")
+    Sleep 700
+    left := JStr(RichEval(w, "document.querySelectorAll('#editor img').length"))
+    RichSay("菜单「从正文中删除这张图」生效", left = "0", "剩 " left)
+    RichSay("删完大图预览也关掉了"
+        , JStr(RichEval(w, "document.getElementById('lightbox').hidden ? 1 : 0")) = "1")
+
+    App.Log("SELFTEST IMAGE 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+
+    App.DeleteNote(id)
+    ; 自检写的图删掉，别把用户的数据目录当垃圾桶
+    Loop Files (imgDir "\*.*") {
+        if !seen.Has(A_LoopFileName)
+            try FileDelete A_LoopFilePath
+    }
+    ; 剪贴板还回去（原来是什么就不知道了，只能还原文本）
+    if (oldClip != "")
+        try A_Clipboard := oldClip
 }
 
 /* 通用流程：塞文字 → 全选 → 点按钮 → 看 DOM 与 Markdown。
