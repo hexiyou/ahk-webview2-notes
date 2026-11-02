@@ -119,6 +119,11 @@ class Export {
         css .= ".chk{width:1.05em;height:1.05em;border:1.5px solid rgba(0,0,0,.38);"
         css .= "border-radius:4px;margin-top:.3em;flex:0 0 auto;}"
         css .= ".task-line[data-done='1'] .task-text{text-decoration:line-through;opacity:.6;}"
+        /* 代码着色：导出页要把界面上看到的高亮一起带上，否则"我在便签里看到的
+           明明是彩色的，导出来一片黑"这种事会一直被人投诉。
+           色板直接读 ui\vendor 里那份主题（和界面共用一份，改一处两边都对），
+           读不到就退回内置的紧凑版。 */
+        css .= Export.HljsCss()
         css .= "@media print{body{background:#fff;}}"
 
         return "<!DOCTYPE html>`r`n"
@@ -130,6 +135,41 @@ class Export {
             . "</head>`r`n<body>`r`n<article>`r`n"
             . body
             . "`r`n</article>`r`n</body>`r`n</html>`r`n"
+    }
+
+    /* 代码着色的色板。界面和导出用同一份 CSS（ui\vendor\highlight-github.css），
+       免得两边颜色慢慢跑偏。程序是单机便签，断网是常态，所以不能引 CDN。 */
+    static HljsCss() {
+        static cached := ""
+        if (cached != "")
+            return cached
+        txt := ""
+        try txt := FileRead(A_ScriptDir "\ui\vendor\highlight-github.css", "UTF-8")
+        catch
+            txt := ""
+        if (Trim(txt) = "")
+            txt := Export.HljsCssFallback()
+        ; 主题自带的 .hljs 背景是纯白；导出页底色是浅米色，白底会像贴了块膏药
+        txt := StrReplace(txt, "background:#fff", "background:transparent")
+        txt := StrReplace(txt, "background: #fff", "background:transparent")
+        ; 主题里给 code 留了 padding，导出页的 pre 已经有了，去掉免得双份
+        txt := "pre code.hljs{display:block;padding:0;background:transparent}"
+            . "code.hljs{padding:0;background:transparent}" txt
+        cached := txt
+        return cached
+    }
+
+    /* vendor 文件被删/没打包时的兜底：只保留最常用的几类 token。
+       宁可颜色少一点，也不能让导出的 HTML 一片黑。 */
+    static HljsCssFallback() {
+        return ".hljs{color:#24292e}"
+            . ".hljs-keyword,.hljs-doctag,.hljs-type,.hljs-selector-tag,.hljs-built_in{color:#d73a49}"
+            . ".hljs-string,.hljs-attr,.hljs-template-tag,.hljs-regexp{color:#032f62}"
+            . ".hljs-title,.hljs-title.function_,.hljs-title.class_{color:#6f42c1}"
+            . ".hljs-number,.hljs-literal,.hljs-symbol,.hljs-bullet{color:#005cc5}"
+            . ".hljs-comment,.hljs-quote,.hljs-meta{color:#6a737d;font-style:italic}"
+            . ".hljs-name,.hljs-tag,.hljs-selector-id,.hljs-selector-class{color:#22863a}"
+            . ".hljs-variable,.hljs-params,.hljs-property{color:#e36209}"
     }
 
     static HtmlEsc(s) {

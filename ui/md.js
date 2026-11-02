@@ -93,10 +93,11 @@
       const line = lines[i];
 
       // 代码块 ``` 或 ~~~
-      const fence = line.match(/^\s*(```+|~~~+)\s*([\w+-]*)\s*$/);
+      const fence = line.match(/^\s*(```+|~~~+)\s*([\w+#-]*)\s*$/);
       if (fence) {
         flushPara();
         const mark = fence[1][0];
+        const lang = fence[2] || '';
         const body = [];
         i++;
         while (i < lines.length && !new RegExp('^\\s*' + mark + '{3,}\\s*$').test(lines[i])) {
@@ -104,7 +105,10 @@
           i++;
         }
         i++; // 跳过结束围栏
-        out.push('<pre><code>' + esc(body.join('\n')) + '</code></pre>');
+        /* 语言写成 class="language-x" 是通行写法，highlight.js 直接认；
+           一并写到 data-lang 上，方便页面那边"改语言"时读回来。 */
+        const attr = lang ? ' class="language-' + esc(lang) + '" data-lang="' + esc(lang) + '"' : '';
+        out.push('<pre><code' + attr + '>' + esc(body.join('\n')) + '</code></pre>');
         continue;
       }
 
@@ -199,6 +203,23 @@
 
   /* ---- HTML -> Markdown ------------------------------------------------- */
 
+  /* 读出代码块的正文：文本节点照收，<br> 折成换行。
+     不能直接用 textContent —— 用户在 <pre> 里按回车时 Chromium 插的是 <br>，
+     那个换行在 textContent 里根本不存在，直接读会把两行粘成一行。 */
+  function preText(node) {
+    let out = '';
+    (function walk(n) {
+      for (const c of n.childNodes) {
+        if (c.nodeType === 3) out += c.nodeValue;
+        else if (c.nodeType === 1) {
+          if (c.tagName === 'BR') out += '\n';
+          else walk(c);
+        }
+      }
+    })(node);
+    return out;
+  }
+
   function toMarkdown(html) {
     if (!html) return '';
     const holder = document.createElement('div');
@@ -230,8 +251,14 @@
         if (node.parentElement && node.parentElement.tagName === 'PRE') return inner();
         return '`' + node.textContent + '`';
       case 'pre': {
-        const code = node.textContent.replace(/\n$/, '');
-        return '\n```\n' + code + '\n```\n\n';
+        /* 代码块里可能是纯文本、也可能是着色后的 span，还可能有用户按回车
+           插进来的 <br>。三种都得还原成换行，否则导出的 Markdown 会把整个
+           代码块挤成一行（着色功能上线后必须这么读，textContent 会丢 <br>）。 */
+        const codeNode = node.querySelector('code');
+        const m = codeNode ? /(?:^|\s)language-([\w+#-]+)/.exec(codeNode.className || '') : null;
+        const lang = m ? m[1] : '';
+        const code = preText(node).replace(/\n+$/, '');
+        return '\n```' + lang + '\n' + code + '\n```\n\n';
       }
       case 'h1': return '\n# ' + inner().trim() + '\n\n';
       case 'h2': return '\n## ' + inner().trim() + '\n\n';
@@ -322,7 +349,10 @@
     return clean.length > 60 ? clean.slice(0, 60) + '…' : clean;
   }
 
-  const MD = { render: render, toMarkdown: toMarkdown, plain: plain, title: title, esc: esc, inline: inline };
+  const MD = {
+    render: render, toMarkdown: toMarkdown, plain: plain, title: title,
+    esc: esc, inline: inline, preText: preText
+  };
 
   if (typeof module === 'object' && module.exports) module.exports = MD;
   else root.MD = MD;

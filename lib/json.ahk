@@ -23,9 +23,48 @@ JsonQuote(s) {
     return '"' s '"'
 }
 
+/* ★ 取字符串字段不能用正则，必须逐字符扫。
+   原因：图片 base64 有几 MB，而 `"data"\s*:\s*"((?:\\u...|\\.|[^"\\])*)"` 这种
+   带嵌套量词的模式在这么长的输入上会撞 PCRE 的 match limit，直接抛
+       "PCRE execution error."
+   这个异常从 COM 回调的定时器里冒出来，页面永远等不到 image-ok，用户看到的是
+   "Ctrl+V 粘图没反应，正文里留一个虚线空图框"。实测 800KB 的 base64 就必崩，
+   而一张普通截图 base64 之后很容易超过这个量级。
+
+   现在改成：InStr 找键 → 线性找结束引号（跳过 \" 这种转义）→ JsonUnescape。
+   全程 O(n) 且不做回溯。 */
 JsonStr(text, key, def := '') {
-    if RegExMatch(text, '"' key '"\s*:\s*"((?:\\u[0-9a-fA-F]{4}|\\.|[^"\\])*)"', &m)
-        return JsonUnescape(m[1])
+    needle := '"' key '"'
+    klen := StrLen(key) + 2
+    n := StrLen(text)
+    p := 0
+    while (p := InStr(text, needle, 1, p + 1)) {
+        i := p + klen
+        ; 键的后面必须是（空白* 冒号 空白* 引号），否则这只是某个值里出现的同名文本
+        while (i <= n && InStr(" `t`r`n", SubStr(text, i, 1)))
+            i++
+        if (SubStr(text, i, 1) != ":")
+            continue
+        i++
+        while (i <= n && InStr(" `t`r`n", SubStr(text, i, 1)))
+            i++
+        if (SubStr(text, i, 1) != '"')
+            continue                     ; 值是数字/布尔/null，交给 JsonNum 之类
+        i++                              ; 跳过开引号
+        q := i
+        while (q := InStr(text, '"', 1, q)) {
+            ; 前面连着奇数个反斜杠 → 这个引号是被转义的，继续往后找
+            bs := 0, k := q - 1
+            while (k >= i && SubStr(text, k, 1) = '\')
+                bs++, k--
+            if (Mod(bs, 2) = 0)
+                break
+            q++
+        }
+        if !q
+            return def
+        return JsonUnescape(SubStr(text, i, q - i))
+    }
     return def
 }
 

@@ -31,6 +31,11 @@ class NoteWindow {
     dragging := false
     resizing := 0
     lastGeo := ""
+    /* 右键菜单的两套。zone 由页面按落点决定：正文里弹"编辑菜单"，
+       其它地方弹"便签菜单"。inpre/lang 只在正文落在代码块里时才有值。 */
+    menuZone := "note"
+    menuInPre := 0
+    menuLang := ""
 
     __New(note) {
         this.id := note.id
@@ -197,6 +202,9 @@ class NoteWindow {
                 case "menu":
                     ; 菜单和确认框都会阻塞线程，所以从消息回调里退出来再弹：
                     ; COM 回调用户不能长时间占着，否则 WebView2 侧会等着卡住
+                    this.menuZone := JsonStr(raw, "zone", "note")
+                    this.menuInPre := JsonNum(raw, "inpre")
+                    this.menuLang := JsonStr(raw, "lang")
                     SetTimer(ObjBindMethod(this, "ShowMenu"), -10)
                 case "font":
                     ; Ctrl+滚轮：页面先自己应用了字号，这里只负责落盘 + 通知其它窗口
@@ -204,6 +212,17 @@ class NoteWindow {
                 case "image":
                     ; 拖拽/粘贴进来的图：base64 解码 + 落盘，别占着 COM 回调线程
                     SetTimer(NoteImageTick(this.id, raw), -10)
+                case "clipboard-set":
+                    ; 编辑菜单的"复制/剪切"：页面把选中文字发过来，由这里写剪贴板。
+                    ; 页面自己调 navigator.clipboard 会被拒 —— 点原生菜单的那一刻
+                    ; 页面已经没有用户手势了。
+                    try A_Clipboard := JsonStr(raw, "text")
+                case "paste-key":
+                    ; 编辑菜单的"粘贴"：读剪贴板必须靠真实按键，只能代按一次 Ctrl+V
+                    SetTimer(ObjBindMethod(this, "PasteKey"), -10)
+                case "pick-image-req":
+                    ; 编辑菜单的"插入图片…"：FileSelect 会阻塞，得挪出回调
+                    SetTimer(ObjBindMethod(this, "PickImage"), -10)
                 case "delete":
                     SetTimer(ObjBindMethod(this, "ConfirmDelete"), -10)
                 case "open-external":
@@ -260,6 +279,9 @@ class NoteWindow {
         this.note.body_text := text
         this.note.body_md := md
         this.note.mode := mode
+        /* 回执。Ctrl+S 那一条页面要弹"✓ 已保存 hh:mm:ss"，所以得把 manual 带回去 ——
+           用户按了保存键却看不到任何反馈，就会怀疑自己是不是没保存上。 */
+        this.Send('{"type":"saved","manual":' (JsonNum(raw, "manual") ? 1 : 0) '}')
     }
 
     TogglePin() => this.DoPin(!this.note.pinned)
@@ -408,6 +430,14 @@ class NoteWindow {
     }
 
     ShowMenu() {
+        /* 两套菜单。页面按落点给 zone：
+             标题栏 / 工具栏 / 底栏 → note  这张便签怎么处理
+             正文编辑区            → edit  这段文字怎么编辑
+           在正文里右键却弹出"删除这张便签"是最容易误点的组合，所以必须分开。 */
+        if (this.menuZone = "edit") {
+            this.ShowEditMenu()
+            return
+        }
         isMd := (this.note.mode = "md")
         m := Menu()
         m.Add("新建便签", (*) => NoteDeferNew())
@@ -428,6 +458,7 @@ class NoteWindow {
         m.Add(isMd ? "切换到富文本编辑" : "切换 Markdown 源码"
             , NoteWindow.MB(ObjBindMethod(this, "SendType", "toggle-md")))
         m.Add("复制全文", NoteWindow.MB(ObjBindMethod(this, "CopyAll")))
+        m.Add("保存`tCtrl+S", NoteWindow.MB(ObjBindMethod(this, "Cmd", "save")))
         m.Add("插入图片…", NoteWindow.MB(ObjBindMethod(this, "PickImage")))
         m.Add()
         /* 字号也有菜单入口：万一没有滚轮（或触控板不好按 Ctrl+滚轮），
@@ -452,6 +483,97 @@ class NoteWindow {
         m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
         m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
         m.Show()
+    }
+
+    /* 正文里的右键菜单：全是"编辑这段文字"的动作。
+       每一项都只是 postMessage 一条 cmd 回页面去执行 —— 菜单是原生菜单，
+       点下去的瞬间页面已经没有用户手势了，直接调 Clipboard API 会被拒。 */
+    ShowEditMenu() {
+        m := Menu()
+        m.Add("撤销`tCtrl+Z", NoteWindow.MB(ObjBindMethod(this, "Cmd", "undo")))
+        m.Add("重做`tCtrl+Y", NoteWindow.MB(ObjBindMethod(this, "Cmd", "redo")))
+        m.Add()
+        m.Add("剪切`tCtrl+X", NoteWindow.MB(ObjBindMethod(this, "Cmd", "cut")))
+        m.Add("复制`tCtrl+C", NoteWindow.MB(ObjBindMethod(this, "Cmd", "copy")))
+        m.Add("粘贴`tCtrl+V", NoteWindow.MB(ObjBindMethod(this, "Cmd", "paste")))
+        m.Add("删除", NoteWindow.MB(ObjBindMethod(this, "Cmd", "delete")))
+        m.Add()
+        m.Add("全选`tCtrl+A", NoteWindow.MB(ObjBindMethod(this, "Cmd", "select-all")))
+        m.Add("清除格式", NoteWindow.MB(ObjBindMethod(this, "Cmd", "clear-format")))
+        m.Add()
+        m.Add("插入代码块", NoteWindow.MB(ObjBindMethod(this, "Cmd", "codeblock")))
+        /* 只有光标确实在代码块里才露出「代码语言」：平时不占地方，
+           要用的时候就在手边。勾选状态来自页面传来的当前语言。 */
+        if (this.menuInPre) {
+            sub := Menu()
+            for lang, label in NoteWindow.CodeLangs() {
+                sub.Add(label, NoteWindow.MB(ObjBindMethod(this, "Cmd", "codelang", lang)))
+                if (lang = this.menuLang)
+                    sub.Check(label)
+            }
+            m.Add("代码语言", sub)
+        }
+        m.Add("插入图片…", NoteWindow.MB(ObjBindMethod(this, "PickImage")))
+        m.Add()
+        m.Add("保存`tCtrl+S", NoteWindow.MB(ObjBindMethod(this, "Cmd", "save")))
+        m.Show()
+    }
+
+    /* 给页面下发一条编辑命令。看名字就知道干什么，页面那边 runCmd 一一对应。 */
+    Cmd(name, arg := "") {
+        json := '{"type":"cmd","name":' JsonQuote(name)
+        if (arg != "")
+            json .= ',"lang":' JsonQuote(arg)
+        json .= '}'
+        this.Send(json)
+    }
+
+    /* 代按一次 Ctrl+V。粘贴这条路绕不开：页面里的 document.execCommand('paste')
+       在 Chromium 里一律返回 false（只给扩展放行），而 navigator.clipboard.read()
+       要求用户手势 —— 点原生菜单的那一下不算。所以只能让宿主补一个真实按键。
+       调用点已经把它挪到 SetTimer 的独立线程，菜单这时也关掉了。 */
+    PasteKey() {
+        if !this.gui
+            return
+        try {
+            WinActivate("ahk_id " this.gui.Hwnd)
+            Sleep 70
+            Send("^v")
+        } catch as e {
+            App.Log("代按粘贴失败：" CleanComError(e.Message))
+            App.Toast("粘贴失败，试试直接按 Ctrl+V")
+        }
+    }
+
+    /* 代码块可选的语言。必须和 ui\code-hl.js 里的 LANGS 保持一致 ——
+       那张表负责真干活（调 highlight.js），这张表只负责画菜单。 */
+    static CodeLangs() {
+        return Map(
+            "", "自动识别",
+            "text", "纯文本",
+            "javascript", "JavaScript",
+            "typescript", "TypeScript",
+            "python", "Python",
+            "xml", "HTML / XML",
+            "css", "CSS",
+            "json", "JSON",
+            "bash", "Bash / Shell",
+            "sql", "SQL",
+            "c", "C",
+            "cpp", "C++",
+            "csharp", "C#",
+            "java", "Java",
+            "go", "Go",
+            "rust", "Rust",
+            "yaml", "YAML",
+            "markdown", "Markdown",
+            "diff", "Diff",
+            "lua", "Lua",
+            "php", "PHP",
+            "ruby", "Ruby",
+            "swift", "Swift",
+            "kotlin", "Kotlin"
+        )
     }
 
     /* 导出统一走 App.ExportNote：它会重新从库里取一次（窗口手里的 this.note
@@ -611,29 +733,50 @@ class NoteWindow {
     }
 
     /* 页面拖拽/粘贴发来的 data:image/png;base64,xxxx —— 解出来写盘，回 URL。
-       失败就回 image-fail，页面那边把占位图删掉。 */
+       失败就回 image-fail，页面那边把占位图删掉。
+
+       ★ 整段必须包 try：这里跑在 SetTimer 的独立线程里，未捕获异常会弹一个
+       模态框把**所有便签**冻住（单 UI 线程），而且页面永远收不到回执，正文里
+       留一个虚线空图框。曾经因为 JsonStr 的正则在大字段上抛 PCRE 异常，用户
+       看到的正是这个现象。 */
     static SaveImage(id, raw) {
         w := NoteWindow.All.Has(id) ? NoteWindow.All[id] : 0
         if !w
             return
-        req := JsonNum(raw, "req")
-        data := JsonStr(raw, "data")
-        path := NoteWindow.WriteDataUrl(data)
-        if (path = "") {
-            w.Send('{"type":"image-fail","req":' req '}')
-            return
+        req := 0
+        try {
+            req := JsonNum(raw, "req")
+            data := JsonStr(raw, "data")
+            path := NoteWindow.WriteDataUrl(data)
+            if (path = "") {
+                App.Log("存图失败：data URL 解不出来（长度 " StrLen(data) "）")
+                w.Send('{"type":"image-fail","req":' req '}')
+                return
+            }
+            w.Send('{"type":"image-ok","req":' req ',"url":' JsonQuote(NoteWindow.FileUrl(path)) '}')
+        } catch as e {
+            App.Log("存图出错：" CleanComError(e.Message) " @" e.Line)
+            try w.Send('{"type":"image-fail","req":' req '}')
         }
-        w.Send('{"type":"image-ok","req":' req ',"url":' JsonQuote(NoteWindow.FileUrl(path)) '}')
     }
 
+    /* ★ 这里也不能用正则：base64 动辄几 MB，`^data:image/([\w.+-]+);base64,(.+)$`
+       在长输入上同样会撞 PCRE 的 match limit。改成 InStr 切一刀。 */
     static WriteDataUrl(dataUrl) {
-        if !RegExMatch(dataUrl, "^data:image/([a-zA-Z0-9.+-]+);base64,(.+)$", &m)
+        head := "data:image/"
+        if (SubStr(dataUrl, 1, StrLen(head)) != head)
             return ""
-        ext := NoteWindow.MimeExt(m[1])
-        buf := NoteWindow.B64Decode(m[2])
+        sep := InStr(dataUrl, ";base64,")
+        if (sep <= 0)
+            return ""
+        mime := SubStr(dataUrl, StrLen(head) + 1, sep - StrLen(head) - 1)
+        b64 := SubStr(dataUrl, sep + 8)
+        if (b64 = "")
+            return ""
+        buf := NoteWindow.B64Decode(b64)
         if !IsObject(buf)
             return ""
-        path := NoteWindow.NewImagePath(ext)
+        path := NoteWindow.NewImagePath(NoteWindow.MimeExt(mime))
         if (path = "")
             return ""
         try {
@@ -658,9 +801,13 @@ class NoteWindow {
     }
 
     /* base64 解码走系统 crypt32，不自己写表：
-       CRYPT_STRING_BASE64(1)，第一遍问长度，第二遍真解。 */
+       CRYPT_STRING_BASE64(1)，第一遍问长度，第二遍真解。
+
+       去空白用 StrReplace 而不是 RegExReplace("\s+")：后者在几 MB 的输入上
+       会逐字节走一遍正则引擎，既慢又有撞 match limit 的风险。 */
     static B64Decode(b64) {
-        b64 := RegExReplace(b64, "\s+", "")
+        if InStr(b64, "`n") || InStr(b64, "`r") || InStr(b64, " ") || InStr(b64, "`t")
+            b64 := StrReplace(StrReplace(StrReplace(StrReplace(b64, "`r"), "`n"), "`t"), " ")
         size := 0
         if !DllCall("crypt32\CryptStringToBinaryW", "wstr", b64, "uint", StrLen(b64)
             , "uint", 1, "ptr", 0, "uint*", &size, "ptr", 0, "ptr", 0)

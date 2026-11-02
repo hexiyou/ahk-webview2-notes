@@ -57,6 +57,9 @@
         case 'image-in': onImageIn(msg.url); break;
         case 'pick-image': hint('用拖拽或 Ctrl+V 也能插图'); break;
         case 'focus': editor.focus(); break;
+        case 'saved': onSaved(msg); break;
+        case 'cmd': runCmd(msg.name, msg); break;
+        case 'toast': hint(msg.text || ''); break;
       }
     });
   }
@@ -88,6 +91,12 @@
     updateCount();
     hint('就绪');
 
+    /* 库里的 body_html 本来就带着上一次的着色 span，能直接显示；但老数据、
+       以及从 Markdown 渲染出来的代码块可能是素的，补一次。注意这时光标还没
+       进编辑区，paintAll 不会碰到"正在编辑的块"。 */
+    paintCodes(true);
+    ensureTrailingBlock();
+
     // 空白便签直接进编辑态
     if (!editor.innerText.trim() && !source.value.trim()) {
       if (state.mode === 'rich') editor.focus();
@@ -100,17 +109,28 @@
   function snapshot() {
     if (state.mode === 'md') {
       const md = source.value;
-      return { md: md, html: MD.render(md), text: MD.plain(md), mode: 'md' };
+      let html = MD.render(md);
+      /* 源码模式下编辑区里没有 DOM，代码块自然是素的。但 body_html 要拿去
+         导出 HTML，颜色得在保存时就带上 —— 渲染到临时容器里上一次色再取
+         innerHTML（容器没挂到文档，不影响页面和光标）。 */
+      if (html.indexOf('<pre') >= 0 && window.CodeHL) {
+        const box = document.createElement('div');
+        box.innerHTML = html;
+        CodeHL.paintAll(box, { force: true });
+        html = box.innerHTML;
+      }
+      return { md: md, html: html, text: MD.plain(md), mode: 'md' };
     }
     const html = editor.innerHTML;
     return { html: html, text: editor.innerText, md: MD.toMarkdown(html), mode: 'rich' };
   }
 
-  function saveNow() {
+  function saveNow(reason) {
     if (!state.ready) return;
     clearTimeout(state.saveTimer);
     state.saveTimer = 0;
     const s = snapshot();
+    const manual = reason === 'manual';
     send({
       type: 'save',
       id: state.id,
@@ -118,23 +138,47 @@
       html: s.html,
       text: s.text,
       md: s.md,
-      mode: s.mode
+      mode: s.mode,
+      manual: manual ? 1 : 0
     });
     state.dirty = false;
-    hint('已保存 ' + new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }));
+    /* 自动保存用灰字时间戳（安静），Ctrl+S 用"保存中…"再让宿主回执改成
+       "✓ 已保存" —— 用户按下去就想看见一个明确的答复，这是肌肉记忆。 */
+    if (manual) hint('保存中…');
+  }
+
+  /* 宿主落库后的回执。只有 Ctrl+S 那条要显眼（"✓ 已保存 21:36:05"）：
+     自动保存每 400ms 就可能来一次，每次都闪一下会把状态栏变成跑马灯。 */
+  function onSaved(msg) {
+    const t = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    state.lastSaved = t;
+    if (msg && msg.manual) hint('✓ 已保存 ' + t, true);
   }
 
   function scheduleSave() {
     state.dirty = true;
     clearTimeout(state.saveTimer);
-    state.saveTimer = setTimeout(saveNow, 400);
+    state.saveTimer = setTimeout(() => saveNow(), 400);
     hint('编辑中…');
   }
 
-  editor.addEventListener('input', () => { refreshEmpty(); updateCount(); scheduleSave(); });
+  /* 打字时不要立刻重画代码块（光标在里面，重画就跳）。等 700ms 没人动了，
+     把**除光标所在块以外**的块补一下色 —— 通常也就一两块，开销可以忽略。 */
+  let paintTimer = 0;
+  function schedulePaint() {
+    clearTimeout(paintTimer);
+    paintTimer = setTimeout(() => {
+      paintCodes(false);
+      ensureTrailingBlock();
+    }, 700);
+  }
+
+  editor.addEventListener('input', () => { refreshEmpty(); updateCount(); scheduleSave(); schedulePaint(); });
   source.addEventListener('input', () => { updateCount(); scheduleSave(); });
-  editor.addEventListener('blur', saveNow);
-  source.addEventListener('blur', saveNow);
+  /* 失焦时把每块都补一次色：这时候光标已经走了，重画绝对安全，
+     而且用户"准备离开这张便签"的时候最希望看到成品的样子。 */
+  editor.addEventListener('blur', () => { paintCodes(false); saveNow(); });
+  source.addEventListener('blur', () => saveNow());
 
   /* ---- 模式切换 --------------------------------------------------------- */
 
@@ -159,6 +203,10 @@
       editor.focus();
       $('btnMd').classList.remove('active');
       hint('所见即所得 · Ctrl+M 看源码');
+      /* 从 Markdown 渲染出来的代码块是素的（只有语言 class），补一次色。
+         这时光标在开头、不在任何 <pre> 里，重画是安全的。 */
+      paintCodes(false);
+      ensureTrailingBlock();
     }
     refreshEmpty();
     updateCount();
@@ -187,7 +235,8 @@
     setPinned(state.pinned);
     send({ type: 'pin', id: state.id, on: !!state.pinned });
   });
-  $('btnMenu').addEventListener('click', () => send({ type: 'menu', id: state.id }));
+  /* ⋯ 按钮固定弹"便签操作"菜单：它是"这张便签"的总入口，不该跟着光标位置变 */
+  $('btnMenu').addEventListener('click', () => send({ type: 'menu', id: state.id, zone: 'note' }));
   /* 右上角 X 是"收起"，不是删除。原来这个按钮直接 Destroy + Delete，
      和"关闭一个窗口"的直觉严重不符，误点一次便签就没了（虽然还能从列表里
      找回来，但正文已经删除）。删除只留右键菜单和列表窗口两个入口。 */
@@ -196,11 +245,39 @@
   /* 右键菜单用系统原生菜单（由宿主弹），不自己画：便签窗口最小可以缩到
      180×140，页面内的菜单根本放不下九项，原生菜单才能超出窗口边界。
      AreDefaultContextMenusEnabled 已经在宿主侧关掉了，所以不会打架。
-     注意别拦输入框的"粘贴"场景：菜单里没有粘贴项，但右键后 Ctrl+V 仍可用。 */
+
+     ★ 两套菜单，按落点分：
+       标题栏 / 工具栏 / 状态栏 → zone=note   便签操作（置顶、颜色、导出、删除…）
+       正文编辑区              → zone=edit   编辑命令（撤销、复制、粘贴、全选…）
+     正文里右键弹出"删除这张便签"是很容易误点的组合，所以必须分开。
+
+     右键落在代码块里时额外带 inpre + 当前语言，宿主据此决定要不要露出
+     「代码语言」子菜单。 */
   document.addEventListener('contextmenu', e => {
     e.preventDefault();
-    send({ type: 'menu', id: state.id });
+    let inPre = 0, lang = '';
+    if (state.mode === 'rich') {
+      const pre = closestPre(e.target);
+      if (pre) { inPre = 1; lang = CodeHL.detect(pre); }
+    }
+    send({ type: 'menu', id: state.id, zone: zoneOf(e.target), inpre: inPre, lang: lang });
   });
+
+  /* 落点在正文里就是编辑菜单，其它（顶栏、底栏、缩放手柄）都是便签菜单 */
+  function zoneOf(el) {
+    if (state.mode === 'md') return (el === source) ? 'edit' : 'note';
+    if (el === editor || editor.contains(el)) return 'edit';
+    return 'note';
+  }
+
+  function closestPre(node) {
+    let el = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+    while (el && el !== editor) {
+      if (el.tagName === 'PRE') return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
 
   function setPinned(on) {
     state.pinned = on ? 1 : 0;
@@ -225,6 +302,7 @@
   }
 
   document.addEventListener('selectionchange', () => {
+    trackPre();                        // 光标离开代码块时给它补上颜色
     if (state.mode !== 'rich') { floatbar.hidden = true; return; }
     if (!selectionInside()) { floatbar.hidden = true; return; }
     const sel = window.getSelection();
@@ -260,7 +338,7 @@
     } else if (cmd === 'code') {
       wrapInlineCode();
     } else if (cmd === 'codeblock') {
-      document.execCommand('formatBlock', false, '<pre>');
+      insertCodeBlock();
     } else if (cmd === 'link') {
       insertLink();
     } else if (cmd.startsWith('formatBlock:')) {
@@ -268,6 +346,9 @@
     } else {
       document.execCommand(cmd, false, null);
     }
+    // 套完块级格式（h2 / 列表 / 引用）后可能把编辑器末尾变成块级元素，
+    // 补一个落脚点，免得"光标出不来"的老毛病换个标签再犯一次。
+    ensureTrailingBlock();
     scheduleSave();
     refreshEmpty();
     updateCount();
@@ -402,6 +483,15 @@
       ph.setAttribute('data-req', String(req));
       ph.alt = '图片';
       insertAtCaret(ph);
+      /* 兜底：宿主万一没回执（存图报错、进程卡住），占位图会永远挂在那里，
+         用户只看到一个虚线空框、也不知道发生了什么。10 秒后自己收掉并说明。 */
+      setTimeout(() => {
+        const el = editor.querySelector('img[data-req="' + req + '"]');
+        if (el) {
+          el.remove();
+          hint('图片没能插入（宿主没有响应）');
+        }
+      }, 10000);
     }
 
     const reader = new FileReader();
@@ -491,12 +581,33 @@
     files.forEach(addImage);
   }
 
-  // Ctrl+V 粘截图：只拦带图片的粘贴，普通文字照旧走浏览器默认行为
+  /* Ctrl+V 粘图。只拦"带图片"的粘贴，普通文字照旧走浏览器默认行为。
+
+     判定不能只看 item.type：
+       · 截图（Win+Shift+S）、画图、浏览器里右键复制图片 → image/png 的 file item
+       · 资源管理器里复制一个图片文件 → 是 file item，但 type 可能是空串，
+         要靠扩展名认
+     两种都收，否则"从文件夹复制一张图粘进来"会毫无反应。 */
+  function pickImageFile(dt) {
+    if (!dt) return null;
+    const items = Array.from(dt.items || []);
+    for (const it of items) {
+      if (it.kind !== 'file') continue;
+      const f = it.getAsFile();
+      if (!f) continue;
+      if (/^image\//i.test(f.type || '') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name || ''))
+        return f;
+    }
+    const files = Array.from(dt.files || []);
+    for (const f of files) {
+      if (/^image\//i.test(f.type || '') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name || ''))
+        return f;
+    }
+    return null;
+  }
+
   function onPaste(e) {
-    const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
-    const hit = items.find(it => it.type && it.type.indexOf('image/') === 0);
-    if (!hit) return;
-    const file = hit.getAsFile();
+    const file = pickImageFile(e.clipboardData);
     if (!file) return;
     e.preventDefault();
     addImage(file);
@@ -509,6 +620,266 @@
      capture 阶段挂可以保证在页面的其它处理之前拿到事件。 */
   document.addEventListener('drop', onDrop, true);
   document.addEventListener('paste', onPaste, true);
+
+  /* ---- 代码块：着色 / 进出 / 语言 ---------------------------------------
+     着色交给 code-hl.js（内部是本地 highlight.js）。这里只负责"什么时候画"：
+       · 页面载入、编辑器失焦、光标离开某个代码块 → 画
+       · 光标还在某块里面 → 一律不画（换 DOM 会跳光标、甚至吃掉刚敲的字）
+     代价是正在打的那一块暂时是素的，一移开光标就上色。这个取舍是故意的：
+     宁可颜色晚半秒，也不能让用户打字时丢字符。 */
+  function richOn() {
+    return state.mode === 'rich' && !editor.hidden;
+  }
+
+  function paintCodes(force) {
+    if (!richOn() || !window.CodeHL) return 0;
+    return CodeHL.paintAll(editor, { force: !!force });
+  }
+
+  /* 光标离开某块时把那块补上颜色。selectionchange 里做，因为这时候 DOM
+     已经稳定，而且光标确定不在那一块了。 */
+  let lastPre = null;
+  function trackPre() {
+    if (!richOn()) { lastPre = null; return; }
+    const sel = window.getSelection();
+    const pre = (sel && sel.rangeCount) ? closestPre(sel.getRangeAt(0).startContainer) : null;
+    if (lastPre && lastPre !== pre && lastPre.isConnected) {
+      CodeHL.paint(lastPre);
+      ensureTrailingBlock();
+    }
+    lastPre = pre;
+  }
+
+  /* 编辑器末尾不能停在 <pre>/<hr>/<table> 上：那样鼠标点在下面的空白处
+     没有任何东西可落，用户会觉得"光标出不来"。补一个空段落当落脚点。 */
+  function ensureTrailingBlock() {
+    if (!richOn()) return;
+    const last = editor.lastElementChild;
+    if (!last) return;
+    if (/^(PRE|HR|TABLE|BLOCKQUOTE|UL|OL)$/.test(last.tagName)) {
+      const tail = document.createElement('div');
+      tail.appendChild(document.createElement('br'));
+      editor.appendChild(tail);
+    }
+  }
+
+  /* 把 <pre> 的正文换掉（只用于"退出代码块时削掉末尾空行"这一处，
+     调用前光标已经要离开了，所以不用担心位置）。 */
+  function setPreText(pre, text) {
+    pre.textContent = text;
+    CodeHL.paint(pre);
+  }
+
+  /* 退出代码块：在后面补一个空段落，把光标放进去。 */
+  function exitCodeBlock(pre) {
+    const text = CodeHL.textOf(pre);
+    // 末尾那几行是空行（用户是连着敲回车敲出来的）就顺手削掉，别在代码块
+    // 底下留一片空白 —— 那看起来像"块没结束"。
+    if (/\n\s*$/.test(text)) setPreText(pre, text.replace(/\n+$/, ''));
+    let next = pre.nextElementSibling;
+    if (!next) {
+      next = document.createElement('div');
+      next.appendChild(document.createElement('br'));
+      pre.after(next);
+    }
+    const r = document.createRange();
+    r.setStart(next, 0);
+    r.collapse(true);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    editor.focus();
+    scheduleSave();
+    ensureTrailingBlock();
+    return true;
+  }
+
+  /* 代码块里的按键。
+     用户的原始问题：插了代码块之后光标再也出不来 —— 因为在 <pre> 里按回车
+     只会不停加空行，而块后面如果没别的段落，鼠标点下面也没地方落。
+     四条出路：空行回车 / Shift+Enter / Ctrl+Enter / 光标在末尾按 ↓。 */
+  function handleCodeKeys(e) {
+    if (!richOn()) return false;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return false;
+    const pre = closestPre(sel.getRangeAt(0).startContainer);
+    if (!pre) return false;
+
+    const text = CodeHL.textOf(pre);
+    const pos = CodeHL.caretOffset(pre);
+    const at = pos ? pos.start : text.length;
+
+    if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey)) {
+      e.preventDefault();
+      return exitCodeBlock(pre);
+    }
+    if (e.key === 'Enter') {
+      // 光标后面（到块尾）全是空白 → 认为用户在"最后一行空行"上又敲了回车
+      const tail = text.slice(at);
+      if (/^\s*$/.test(tail)) {
+        e.preventDefault();
+        return exitCodeBlock(pre);
+      }
+      return false;                       // 代码中间回车照常加行
+    }
+    if (e.key === 'ArrowDown' && !e.shiftKey && at >= text.length) {
+      e.preventDefault();
+      return exitCodeBlock(pre);
+    }
+    if (e.key === 'Backspace' && text.trim() === '') {
+      // 空的代码块：退格直接把它拆掉，变回普通段落
+      e.preventDefault();
+      const div = document.createElement('div');
+      div.appendChild(document.createElement('br'));
+      pre.replaceWith(div);
+      const r = document.createRange();
+      r.setStart(div, 0);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      scheduleSave();
+      return true;
+    }
+    return false;
+  }
+
+  /* 插入代码块：先给选区套 formatBlock，再保证它后面有落脚点，
+     最后把光标放进去、立刻上一次色（空块没什么可上的，主要是把语言标记写上）。 */
+  function insertCodeBlock() {
+    editor.focus();
+    if (savedRange) {
+      const s = window.getSelection();
+      s.removeAllRanges();
+      s.addRange(savedRange);
+    }
+    const sel = window.getSelection();
+    const pre0 = (sel && sel.rangeCount) ? closestPre(sel.getRangeAt(0).startContainer) : null;
+    if (!pre0) {
+      document.execCommand('formatBlock', false, '<pre>');
+    }
+    const pre = (sel && sel.rangeCount) ? closestPre(sel.getRangeAt(0).startContainer) : null;
+    if (pre) {
+      /* 特意不写死语言：留着让"光标离开时自动识别"去判。写死成 text 的话
+         用户敲进来的 JS 永远不会上色，反而更差。 */
+      CodeHL.paint(pre);
+    }
+    ensureTrailingBlock();
+    scheduleSave();
+    hint('代码块 · Shift+Enter 或空行回车可跳出');
+  }
+
+  function setCodeLang(lang) {
+    const sel = window.getSelection();
+    const pre = (sel && sel.rangeCount) ? closestPre(sel.getRangeAt(0).startContainer) : null;
+    if (!pre) { hint('先把光标放到代码块里'); return; }
+    const saved = CodeHL.caretOffset(pre);
+    CodeHL.setLang(pre, lang);
+    CodeHL.paint(pre);
+    if (saved) CodeHL.restoreCaret({ ...saved, pre: pre });
+    scheduleSave();
+    hint('代码语言：' + CodeHL.labelOf(lang || 'text'));
+  }
+
+  /* ---- 编辑菜单的命令 ---------------------------------------------------
+     菜单由宿主画（系统原生），点哪一项就 postMessage 回来一条 cmd。
+     剪切/复制走宿主的 A_Clipboard 而不是 navigator.clipboard：原生菜单点下去
+     那一刻页面已经没有"用户手势"了，Clipboard API 会被拒。
+     粘贴反过来 —— 读剪贴板必须靠真实按键，所以让宿主代按一次 Ctrl+V。 */
+  function selectedText() {
+    if (state.mode === 'md') {
+      const s = source;
+      const a = s.selectionStart, b = s.selectionEnd;
+      if (a == null || a === b) return '';
+      return s.value.slice(a, b);
+    }
+    return String(window.getSelection() || '');
+  }
+
+  function hasSelection() {
+    if (state.mode === 'md') return source.selectionStart !== source.selectionEnd;
+    const sel = window.getSelection();
+    return !!(sel && sel.rangeCount && !sel.isCollapsed);
+  }
+
+  function deleteSelection() {
+    if (state.mode === 'md') {
+      const s = source;
+      const a = s.selectionStart, b = s.selectionEnd;
+      if (a != null && a !== b) {
+        s.value = s.value.slice(0, a) + s.value.slice(b);
+        s.selectionStart = s.selectionEnd = a;
+        scheduleSave();
+      }
+      return;
+    }
+    document.execCommand('delete', false, null);
+    scheduleSave();
+  }
+
+  function selectAllText() {
+    if (state.mode === 'md') {
+      source.focus();
+      source.select();
+      return;
+    }
+    const r = document.createRange();
+    r.selectNodeContents(editor);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    editor.focus();
+  }
+
+  function runCmd(name, msg) {
+    switch (name) {
+      case 'undo': document.execCommand('undo', false, null); scheduleSave(); break;
+      case 'redo': document.execCommand('redo', false, null); scheduleSave(); break;
+      case 'cut': {
+        const t = selectedText();
+        if (!t) { hint('没有选中内容'); break; }
+        send({ type: 'clipboard-set', text: t });
+        deleteSelection();
+        hint('已剪切');
+        break;
+      }
+      case 'copy': {
+        const t = selectedText();
+        if (!t) { hint('没有选中内容'); break; }
+        send({ type: 'clipboard-set', text: t });
+        hint('已复制');
+        break;
+      }
+      case 'paste':
+        send({ type: 'paste-key' });
+        break;
+      case 'delete':
+        deleteSelection();
+        break;
+      case 'select-all':
+        selectAllText();
+        break;
+      case 'clear-format':
+        if (state.mode === 'rich') { document.execCommand('removeFormat', false, null); scheduleSave(); }
+        break;
+      case 'codeblock':
+        insertCodeBlock();
+        break;
+      case 'codelang':
+        setCodeLang((msg && msg.lang) || '');
+        break;
+      case 'insert-image':
+        send({ type: 'pick-image-req' });
+        break;
+      case 'toggle-md':
+        setMode(state.mode === 'md' ? 'rich' : 'md');
+        break;
+      case 'save':
+        saveNow('manual');
+        break;
+      default:
+        break;
+    }
+  }
 
   /* ---- 点图片看原图 -----------------------------------------------------
      正文里的图最大 180px 高（见 note.css），看不清楚；点一下用遮罩铺满窗口
@@ -602,14 +973,23 @@
       e.preventDefault();
       return;
     }
-    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveNow(); return; }
+    /* Ctrl+S：立刻落库，并且要看得见回执（宿主回 saved 之后显示"✓ 已保存"）。
+       便签本身 400ms 就会自动保存，但按了没反应会让人以为保存失效。 */
+    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveNow('manual'); return; }
     if (mod && e.key.toLowerCase() === 'm') { e.preventDefault(); setMode(state.mode === 'md' ? 'rich' : 'md'); return; }
     if (e.key === 'Escape') {
       if (closeLightbox()) return;      // 看图时 Esc 只关遮罩，别顺手把选区也清了
+      /* Esc 在代码块里是"出来"，不是"存盘并清选区" —— 先让 handleCodeKeys
+         处理，它没接手才走默认。 */
+      if (handleCodeKeys(e)) return;
       saveNow();
       window.getSelection().removeAllRanges();
       return;
     }
+
+    /* 代码块的出路。放在这里而不是 editor 上：Markdown 源码模式（textarea）
+       也会冒泡到 document，handleCodeKeys 里已经按 richOn() 挡掉了。 */
+    if (state.mode === 'rich' && handleCodeKeys(e)) return;
 
     // Markdown 源码里 Tab 要能缩进，而不是把焦点跳走
     if (state.mode === 'md' && e.key === 'Tab') {
@@ -647,12 +1027,16 @@
   }
 
   let hintTimer = 0;
-  function hint(text) {
+  function hint(text, ok) {
     hintEl.textContent = text;
     const status = $('status');
     status.classList.add('show');
+    status.classList.toggle('ok', !!ok);
     clearTimeout(hintTimer);
-    hintTimer = setTimeout(() => status.classList.remove('show'), 1600);
+    hintTimer = setTimeout(() => {
+      status.classList.remove('show');
+      status.classList.remove('ok');
+    }, ok ? 2400 : 1600);
   }
 
   function copyAll() {

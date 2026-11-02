@@ -187,6 +187,54 @@ Check("ShowAll 不再用 Store.Visible()（会导致收起后再也点不出来�
 noteJs := FileRead(A_ScriptDir "\..\ui\note.js", "UTF-8")
 listJs := FileRead(A_ScriptDir "\..\ui\list.js", "UTF-8")
 Check("便签页有 contextmenu → menu", InStr(noteJs, "contextmenu") > 0 && InStr(noteJs, "type: 'menu'") > 0)
+
+; ---------------------------------------------------------------------------
+; 7. 右键菜单分两套：正文给"编辑菜单"，其它地方给"便签菜单"
+;    这套东西最容易坏的形态是"跨文件对不上" ——
+;    宿主 Cmd("xxx") 发出去，页面 runCmd 里没有对应的 case，点了就是没反应。
+;    所以这里把两边都扫一遍，逐条对。
+; ---------------------------------------------------------------------------
+
+Check("宿主有 ShowEditMenu", NoteWindow.Prototype.HasMethod("ShowEditMenu"))
+Check("宿主有 Cmd 转发", NoteWindow.Prototype.HasMethod("Cmd"))
+Check("宿主有 PasteKey（代按 Ctrl+V）", NoteWindow.Prototype.HasMethod("PasteKey"))
+Check("宿主有 CodeLangs", NoteWindow.HasMethod("CodeLangs"))
+
+srcWin := FileRead(A_ScriptDir "\..\lib\note-window.ahk", "UTF-8")
+Check("页面按落点区分 zone=edit / note"
+    , InStr(noteJs, "zone: inText ? 'edit' : 'note'") > 0 || InStr(noteJs, "'edit' : 'note'") > 0)
+Check("宿主按 zone 分发菜单", InStr(srcWin, 'this.menuZone = "edit"') > 0)
+
+; 宿主能发出的每一条 cmd，页面必须能接住
+pos := 1, cmds := Map()
+while RegExMatch(srcWin, 'ObjBindMethod\(this, "Cmd", "([a-z-]+)"', &m, pos) {
+    cmds[m[1]] := 1
+    pos := m.Pos + m.Len
+}
+Check("宿主发得出至少 8 条编辑命令", cmds.Count >= 8, "共 " cmds.Count " 条")
+for name, _ in cmds {
+    has := RegExMatch(noteJs, "case '" name "':") > 0
+    Check("页面能接住 cmd：" name, has, has ? "" : "runCmd 里缺 case")
+}
+
+; 反过来：页面认识的命令，宿主菜单里也得有入口（save 还有 Ctrl+S，不必在菜单里）
+for name in ["undo", "redo", "cut", "copy", "paste", "delete", "select-all"
+    , "clear-format", "codeblock", "codelang"]
+    Check("编辑菜单里有：" name, cmds.Has(name) || RegExMatch(srcWin, '"Cmd", "' name '"') > 0)
+
+; 两张语言表必须一致：宿主画菜单、页面调 highlight.js，对不上就会出现
+; "选了 Python 但没反应"
+langsAhk := NoteWindow.CodeLangs()
+hlJs := FileRead(A_ScriptDir "\..\ui\code-hl.js", "UTF-8")
+badLang := ""
+for k, v in langsAhk {
+    ; ui\code-hl.js 里的写法是 ['javascript', 'JavaScript']
+    if !InStr(hlJs, "['" k "', '" v "']")
+        badLang .= (badLang = "" ? "" : ",") (k = "" ? "(空)" : k)
+}
+Check("代码语言表和 ui\code-hl.js 一致", badLang = "", badLang = "" ? langsAhk.Count " 项" : "对不上：" badLang)
+Check("宿主语言表覆盖常见语言", langsAhk.Count >= 15, langsAhk.Count " 项")
+
 Check("列表页有 contextmenu → menu", InStr(listJs, "contextmenu") > 0 && InStr(listJs, "type: 'menu'") > 0)
 Check("便签页处理宿主下发的 pin", InStr(noteJs, "case 'pin'") > 0)
 

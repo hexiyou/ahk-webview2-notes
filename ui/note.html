@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>便签</title>
   <link rel="stylesheet" href="note.css">
+  <link rel="stylesheet" href="vendor/highlight-github.css">
 </head>
 
 <body data-color="yellow">
@@ -83,6 +84,10 @@
     <button data-cmd="insertHorizontalRule" title="分割线">&#8212;</button>
   </div>
 
+  <!-- highlight.js 本地版（BSD-3-Clause，11.9.0）。界面上要离线可用，
+       不能引 CDN：程序是单机便签，断网是常态。 -->
+  <script src="vendor/highlight.min.js"></script>
+  <script src="code-hl.js"></script>
   <script src="md.js"></script>
   <script src="note.js"></script>
 </body>

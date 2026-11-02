@@ -139,12 +139,16 @@ class App {
             SetTimer(SelfTestRich, -2500)
         if App.HasArg("--selftest-note")
             SetTimer(SelfTestNote, -2500)
+        if App.HasArg("--selftest-edit")
+            SetTimer(SelfTestEdit, -2500)
         if App.HasArg("--selftest-export")
             SetTimer(SelfTestExport, -2500)
         if App.HasArg("--selftest-settings")
             SetTimer(SelfTestSettings, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
+        if App.HasArg("--shot-code")
+            SetTimer(SelfTestShotCode, -2500)
 
         ; 8) 几何变化巡检：拖动/缩放结束后把位置写回库
         SetTimer(NoteGeoTick, 800)
@@ -1148,17 +1152,30 @@ RichSay(name, ok, detail := "") {
     App.Log((ok ? "PASS " : "FAIL ") name (detail != "" ? "  [" detail "]" : ""))
 }
 
-; 临时：给 README 拍一张设置面板的截图
+; 给 README 拍一张设置面板的截图
 ShotSettings(path) {
     w := SettingsWindow.Win
     if !w
         return false
+    return ShotWv(w.wv, path)
+}
+
+; 给 README 拍一张"带代码着色的便签"
+ShotNote(w, path) {
+    if !w
+        return false
+    return ShotWv(w.wv, path)
+}
+
+/* 把一个 WebView2 的当前画面拍成 PNG。原来只有设置面板需要，加了代码着色的
+   截图功能之后两条路都要用，抽出来。 */
+ShotWv(wv, path) {
     pStream := 0
     hr := DllCall("ole32\CreateStreamOnHGlobal", "ptr", 0, "int", 1, "ptr*", &pStream, "int")
     if (hr != 0 || !pStream)
         return false
     try {
-        w.wv.CapturePreviewAsync(0, pStream).await()
+        wv.CapturePreviewAsync(0, pStream).await()
         hGlobal := 0
         DllCall("ole32\GetHGlobalFromStream", "ptr", pStream, "ptr*", &hGlobal)
         size := DllCall("kernel32\GlobalSize", "ptr", hGlobal, "uptr")
@@ -1186,6 +1203,56 @@ SelfTestShotSettings() {
         App.Log("SHOT settings=" ok)
     }
     SettingsWindow.Close()
+    SelfTestDone()
+}
+
+/* 给 README 拍一张"带代码着色"的便签截图：这段就是用户看到的样子，
+   肉眼看一眼比一堆断言更能确认配色没有跟便签底色打架。 */
+SelfTestShotCode() {
+    w := 0
+    try {
+        w := App.NewNote()
+        Loop 40 {
+            if w && w.ready
+                break
+            Sleep 100
+        }
+        ; 便签默认窗口偏小，临时撑大一点，截图才放得下代码
+        if w && w.gui
+            WinMove(, , 420, 480, "ahk_id " w.gui.Hwnd)
+        if w && w.wvc
+            w.wvc.Fill()
+        Sleep 300
+        RichEval(w, "
+        ( LTrim Join
+        (function(){
+          const ed = document.getElementById('editor');
+          ed.innerHTML = '<h2>代码着色</h2>'
+            + '<p>光标移开代码块之后自动上色，<b>正文一个字符都不会变</b>。</p>'
+            + '<pre><code class=""language-js"">'
+            + 'function greet(name) {'
+            + '\n' + '  const msg = \"hello \" + name;'
+            + '\n' + '  // 行注释'
+            + '\n' + '  return msg;'
+            + '\n' + '}'
+            + '</code></pre>'
+            + '<pre><code class=""language-python"">'
+            + 'def fib(n):'
+            + '\n' + '    return n if n < 2 else fib(n-1) + fib(n-2)'
+            + '</code></pre>'
+            + '<p>右侧 <b>⋯</b> 是便签菜单，正文里右键是编辑菜单。</p>';
+          window.CodeHL.paintAll(ed, { force: true });
+          return 1;
+        })()
+        )")
+        Sleep 600
+        ok := ShotNote(w, A_ScriptDir "\assets\shot-code.png")
+        App.Log("SHOT code=" ok)
+        if w
+            App.DeleteNote(w.id)
+    } catch as e {
+        App.Log("SHOT code 失败：" CleanComError(e.Message) " @" e.Line)
+    }
     SelfTestDone()
 }
 
@@ -1313,7 +1380,9 @@ SelfTestExportRun() {
         body_md: md,
         body_text: "标题一`n`n普通粗体和斜体，还有删除线和 code。`n`n列表项`n待办一`n待办二",
         body_html: "<h1>标题一</h1><p>普通<b>粗体</b>和<i>斜体</i></p>"
-            . "<p><img src=`"" NoteWindow.FileUrl(imgPath) "`" alt=`"图`"></p>",
+            . "<p><img src=`"" NoteWindow.FileUrl(imgPath) "`" alt=`"图`"></p>"
+            . "<pre><code data-lang=`"js`"><span class=`"hljs-keyword`">var</span>"
+            . " a = <span class=`"hljs-number`">1</span>;</code></pre>",
         mode: "rich"
     }
 
@@ -1334,6 +1403,11 @@ SelfTestExportRun() {
     RichSay("HTML 图片内嵌成 data URI", InStr(html, "data:image/png;base64,iVBOR") > 0)
     RichSay("HTML 不再引用 file://", InStr(html, "file:///") = 0)
     RichSay("HTML 标题做了转义处理", InStr(html, "<title>导出测试") > 0)
+    /* 代码着色要跟着走：正文里的 token span 保留，色板也内联进 <style>，
+       否则导出后别人打开是一坨黑字，跟便签里看到的完全不是一回事。 */
+    RichSay("HTML 保留代码着色 span", InStr(html, "hljs-keyword") > 0)
+    RichSay("HTML 内联了着色色板", InStr(html, ".hljs-string") > 0 || InStr(html, ".hljs-comment") > 0)
+    RichSay("HTML 的代码块不再是白底", InStr(html, "background:transparent") > 0)
 
     ; ---- RTF ----
     rtf := Export.Render(note, "rtf")
@@ -1469,6 +1543,308 @@ SelfTestNoteRun() {
 
     ; 收尾：自检建的这张删掉，别留在用户库里
     App.DeleteNote(id)
+}
+
+/* ============================================================================
+   自检：大图粘贴 / Ctrl+S 回执 / 代码块出路 / 代码着色 / 编辑菜单命令
+
+   这几条对应一轮真实的用户反馈，坑点如下：
+     · 大图粘贴 —— 图片 base64 有几 MB，宿主 JsonStr 的正则在 800KB 上就撞
+       PCRE match limit。以前这里用的是 8x8 的小图（base64 才几百字节），
+       所以"自检全绿、用户一粘就废"。现在故意造一张 700×700 的噪点图，
+       base64 上到 1MB 以上，跑不通就说明回归了。
+     · Ctrl+S —— 要看得见的回执，不能按下去毫无反应。
+     · 代码块 —— 插进去之后光标必须出得来（回车/Shift+Enter/↓ 三条路）。
+     · 着色 —— 光标离开代码块时补色，且正文一个字符都不能变。
+
+   本机用 SendInput 注入键盘会卡死（见 README），所以按键一律在页面里
+   dispatchEvent 造 KeyboardEvent，走的是真实的 keydown 监听。
+   ========================================================================== */
+SelfTestEdit() {
+    try SelfTestEditRun()
+    catch as e {
+        App.Log("SELFTEST EDIT 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST EDIT 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestEditRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+
+    w := App.NewNote()
+    if !w {
+        App.Log("SELFTEST EDIT 没能建出便签")
+        return
+    }
+    id := w.id
+    Loop 40 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("页面就绪", w.ready = 1, w.ready)
+
+    RichEval(w, "
+    ( LTrim Join
+    window.__e = {
+      ed: () => document.getElementById('editor'),
+      put(h) { this.ed().innerHTML = h; },
+      all() {
+        const r = document.createRange();
+        r.selectNodeContents(this.ed());
+        const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      },
+      click(c) { document.querySelector('[data-cmd=\"' + c + '\"]').click(); },
+      pre() { return this.ed().querySelector('pre'); },
+      caretEnd(el) {
+        const r = document.createRange();
+        r.selectNodeContents(el); r.collapse(false);
+        const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      },
+      caretAt(el, off) {
+        const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        let acc = 0, n, last = null;
+        while ((n = w.nextNode())) {
+          const len = n.nodeValue.length;
+          if (off <= acc + len) {
+            const r = document.createRange();
+            r.setStart(n, Math.max(0, off - acc));
+            r.collapse(true);
+            const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+            return 1;
+          }
+          acc += len; last = n;
+        }
+        if (last) this.caretEnd(el);
+        return 0;
+      },
+      key(k, mod) {
+        const ev = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true,
+          ctrlKey: !!(mod && mod.ctrl), shiftKey: !!(mod && mod.shift) });
+        this.ed().dispatchEvent(ev);
+        return ev.defaultPrevented ? 1 : 0;
+      },
+      caretIn(sel) { const s = getSelection(); return (s.rangeCount && sel.contains(s.anchorNode)) ? 1 : 0; },
+      status() { return document.getElementById('status').className + '|' + document.getElementById('hint').textContent; }
+    };
+    1;
+    )")
+
+    ; ---- 0. 右键落点分两套菜单（把 postMessage 拦下来看它到底发了什么）----
+    /* 原生菜单没法自动点，但"页面到底有没有按落点区分"是能验的：
+       临时替换 chrome.webview.postMessage，dispatch 一个 contextmenu，
+       把消息捞出来即可 —— 消息被截住了，宿主那边不会真弹菜单。 */
+    rawZones := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const br = window.chrome.webview;
+      const orig = br.postMessage.bind(br);
+      let last = null;
+      br.postMessage = function(m){ last = m; };
+      const fire = function(el){
+        last = null;
+        el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        return last || {};
+      };
+      const ed = document.getElementById('editor');
+      ed.innerHTML = '<p>正文</p><pre><code>var a = 1;</code></pre>';
+      const a = fire(ed);
+      const c = fire(ed.querySelector('pre'));
+      const b = fire(document.querySelector('.bar'));
+      br.postMessage = orig;
+      ed.innerHTML = '';
+      return (a.zone || '-') + '|' + (b.zone || '-') + '|' + (c.inpre || 0);
+    })()
+    )")
+    zones := JStr(rawZones)
+    zp := StrSplit(zones, "|")
+    zEd := zp.Length >= 1 ? zp[1] : ""
+    zBar := zp.Length >= 2 ? zp[2] : ""
+    zPre := zp.Length >= 3 ? zp[3] : ""
+    RichSay("正文右键 → 编辑菜单（zone=edit）", zEd = "edit", zones)
+    RichSay("标题栏右键 → 便签菜单（zone=note）", zBar = "note", zones)
+    RichSay("代码块里右键会带上 inpre（露出「代码语言」）", zPre = "1", zones)
+
+    ; ---- 1. 大图粘贴：一张 700×700 噪点图，base64 一定超过 1MB -------------
+    imgDir := App.DataDir "\images"
+    before := 0
+    seen := Map()                     ; 自检会往图片目录里写文件，收尾要清干净
+    Loop Files (imgDir "\*.*") {
+        before++
+        seen[A_LoopFileName] := 1
+    }
+
+    b64len := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const n = 700, c = document.createElement('canvas');
+      c.width = n; c.height = n;
+      const g = c.getContext('2d'), d = g.createImageData(n, n);
+      let x = 123456789;
+      for (let i = 0; i < d.data.length; i += 4) {
+        x = (x * 1103515245 + 12345) & 0x7fffffff;
+        d.data[i] = x & 255; d.data[i+1] = (x >> 8) & 255;
+        d.data[i+2] = (x >> 16) & 255; d.data[i+3] = 255;
+      }
+      g.putImageData(d, 0, 0);
+      const u = c.toDataURL('image/png');
+      const b = atob(u.split(',')[1]);
+      const a = new Uint8Array(b.length);
+      for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i);
+      const dt = new DataTransfer();
+      dt.items.add(new File([a], 'big.png', { type: 'image/png' }));
+      document.body.dispatchEvent(new ClipboardEvent('paste',
+        { clipboardData: dt, bubbles: true, cancelable: true }));
+      return u.length;
+    })()
+    )")
+    n64 := Number(JStr(b64len))
+    ; 这条断言是自检的"体检"：base64 太短就复现不了老 bug，测了等于没测
+    RichSay("测试图够大（base64 > 800KB，老代码在这里崩）", n64 > 800000, n64)
+
+    ; 存盘 + 回 URL 需要时间（2MB base64 走一遍 postMessage / 解码 / 写盘）
+    Loop 40 {
+        pending := JStr(RichEval(w, "document.querySelectorAll('#editor img.pending').length"))
+        if (pending = "0")
+            break
+        Sleep 250
+    }
+    Sleep 300
+    hasImg := JStr(RichEval(w, "document.querySelector('#editor img')?1:0"))
+    src := JStr(RichEval(w, "(document.querySelector('#editor img')||{}).src||''"))
+    left := JStr(RichEval(w, "document.querySelectorAll('#editor img.pending').length"))
+    after := 0
+    Loop Files (imgDir "\*.*")
+        after++
+
+    RichSay("大图粘贴：图出现在正文里", hasImg = "1", "img=" hasImg)
+    RichSay("大图粘贴：占位框没有残留", left = "0", "pending=" left)
+    RichSay("大图粘贴：src 是 file:// 链接", InStr(src, "file:///") > 0, SubStr(src, 1, 70))
+    RichSay("大图粘贴：图片落盘", after = before + 1, before " -> " after)
+
+    ; ---- 2. Ctrl+S：按下去要有回执 -----------------------------------------
+    RichEval(w, "__e.put('<p>Ctrl+S 测试</p>');1")
+    Sleep 200
+    prevented := RichEval(w, "__e.key('s', {ctrl:true})")
+    RichSay("Ctrl+S 被页面接管（不会触发浏览器保存）", JStr(prevented) = "1", prevented)
+    Sleep 700
+    st := JStr(RichEval(w, "__e.status()"))
+    RichSay("Ctrl+S 后状态栏出现『已保存』", InStr(st, "已保存") > 0, st)
+    RichSay("Ctrl+S 的回执是强调样式（status.ok）", InStr(st, "ok") > 0, st)
+
+    ; ---- 3. 代码块：三条出路 ------------------------------------------------
+    RichEval(w, "__e.put('<p>x</p>');__e.all();1")
+    Sleep 150
+    RichEval(w, "__e.click('codeblock');1")
+    Sleep 250
+    hasPre := JStr(RichEval(w, "__e.pre()?1:0"))
+    RichSay("工具条能插入代码块", hasPre = "1", hasPre)
+
+    RichEval(w, "(function(){var p=__e.pre();p.textContent='const a = 1;';__e.caretEnd(p);return 1})()")
+    Sleep 120
+    /* 光标在末尾按回车：应该"跳出去"，而不是在块里再加一行。
+       判据 = 焦点落到了 <pre> 后面的兄弟节点里。 */
+    RichEval(w, "__e.key('Enter',{})")
+    Sleep 250
+    rawOut := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const p = __e.pre();
+      const next = p.nextElementSibling;
+      if (!next) return 'no-next';
+      return __e.caretIn(next) ? '1' : '0';
+    })()
+    )")
+    out := JStr(rawOut)
+    RichSay("代码块末尾回车 → 光标跳出去", out = "1", out)
+
+    /* 块里还有内容时按回车不能跳（那是在加行） */
+    RichEval(w, "(function(){var p=__e.pre();p.textContent='ab';__e.caretAt(p,1);return 1})()")
+    Sleep 100
+    mid := JStr(RichEval(w, "__e.key('Enter',{})"))
+    RichSay("代码中间回车仍留在块里（不误跳）", mid = "0", mid)
+
+    /* Shift+Enter 随时能跳出来 */
+    RichEval(w, "(function(){var p=__e.pre();p.textContent='a';__e.caretEnd(p);return 1})()")
+    Sleep 100
+    sh := JStr(RichEval(w, "__e.key('Enter',{shift:true})"))
+    Sleep 250
+    rawOut2 := RichEval(w, "
+    ( LTrim Join
+    (function(){ var p=__e.pre(); var next=p.nextElementSibling;
+      return (next && __e.caretIn(next)) ? '1' : '0'; })()
+    )")
+    out2 := JStr(rawOut2)
+    RichSay("Shift+Enter 直接跳出代码块", out2 = "1", out2)
+
+    /* 空的代码块按退格，整块拆掉 */
+    RichEval(w, "(function(){var p=__e.pre();p.textContent='';__e.caretEnd(p);return 1})()")
+    Sleep 100
+    bs := JStr(RichEval(w, "__e.key('Backspace',{})"))
+    Sleep 200
+    gone := JStr(RichEval(w, "document.querySelectorAll('#editor pre').length"))
+    RichSay("空代码块退格即拆掉", gone = "0", "剩下 " gone " 个 pre")
+
+    ; ---- 4. 着色：光标离开后自动上色 ---------------------------------------
+    /* 注意：这段 JS 用的是 ( LTrim Join 续行，Join 会把各行直接拼在一起，
+       所以**不能写行注释**（两条斜杠那种）—— 它会把后面的行一起注掉，
+       脚本直接语法错误、整段静默失效。第一次就是栽在这儿，三条断言全挂。
+       要写注释就用块注释。 */
+    RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const ed = __e.ed();
+      ed.innerHTML = '<pre><code>const a = 1;</code></pre><div><br></div>';
+      const p = ed.querySelector('pre');
+      __e.caretEnd(p);
+      return 1;
+    })()
+    )")
+    Sleep 150
+    /* 把光标移到后面那个段落：这一步会触发 selectionchange → 给前一块补色。 */
+    RichEval(w, "(function(){var d=__e.ed().querySelector('div');__e.caretEnd(d);return 1})()")
+    Sleep 600
+    kw := JStr(RichEval(w, "document.querySelector('#editor pre .hljs-keyword')?1:0"))
+    kept := JStr(RichEval(w, "__e.pre().textContent"))
+    RichSay("光标离开后代码块上了色", kw = "1", "hljs-keyword=" kw)
+    RichSay("着色不改代码正文", kept = "const a = 1;", kept)
+
+    ; 显式指定语言（等价于右键菜单「代码语言」）
+    RichEval(w, "(function(){window.CodeHL.setLang(__e.pre(),'python');window.CodeHL.paint(__e.pre());return 1})()")
+    Sleep 150
+    lang := JStr(RichEval(w, "__e.pre().getAttribute('data-lang')||''"))
+    RichSay("能显式指定代码语言", lang = "python", lang)
+
+    ; ---- 5. 编辑菜单的命令通路（宿主 → 页面 runCmd） -----------------------
+    RichEval(w, "document.querySelector('#editor').focus();1")
+    w.Send('{"type":"cmd","name":"select-all"}')
+    Sleep 300
+    rawAll := RichEval(w, "
+    ( LTrim Join
+    (function(){
+      const s = getSelection();
+      if (!s.rangeCount) return '0';
+      const t = s.toString();
+      return t.length > 0 ? '1' : '0';
+    })()
+    )")
+    all := JStr(rawAll)
+    RichSay("编辑菜单「全选」生效", all = "1", all)
+
+    w.Send('{"type":"cmd","name":"undo"}')
+    Sleep 250
+    RichSay("编辑菜单「撤销」不报错", 1)
+
+    App.Log("SELFTEST EDIT 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+
+    App.DeleteNote(id)
+    ; 清掉自检写进图片目录的噪点图，别把用户的数据目录当垃圾桶
+    Loop Files (imgDir "\*.*") {
+        if !seen.Has(A_LoopFileName)
+            try FileDelete A_LoopFilePath
+    }
 }
 
 /* 通用流程：塞文字 → 全选 → 点按钮 → 看 DOM 与 Markdown。

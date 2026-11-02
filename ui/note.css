@@ -180,7 +180,12 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: .92em;
   overflow-x: auto;
-  white-space: pre-wrap;
+  /* ★ 代码块用 white-space: pre（不要 pre-wrap）：
+     pre-wrap 会把长行折到下一行，而折下来的那半行是顶格开始的 —— 缩进丢了，
+     看起来像坏掉的代码。宁可横向滚动，也不要视觉上把结构搞乱。
+     横向滚动条由 overflow-x: auto 提供，不会把窗口撑宽。 */
+  white-space: pre;
+  tab-size: 4;
 }
 .editor code {
   padding: .1em .32em;
@@ -190,6 +195,16 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
   font-size: .92em;
 }
 .editor pre code { padding: 0; background: none; }
+
+/* ---- 代码着色 -----------------------------------------------------------
+   vendor/highlight-github.css 是整套 GitHub 浅色主题，它会把 .hljs 的背景
+   刷成纯白。便签底色是彩色的（黄/粉/蓝…），一块白底会很扎眼，所以这里把
+   背景与内边距清掉，只留 token 的颜色。 */
+.editor pre code.hljs,
+.editor pre .hljs { background: transparent; padding: 0; }
+
+/* 代码块在编辑器里再压一点行距：默认 1.62 对代码来说太空 */
+.editor pre { line-height: 1.5; }
 .editor a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .editor hr { border: 0; border-top: 1px solid var(--line); margin: .6em 0; }
 .editor img {
@@ -295,6 +310,9 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
   pointer-events: none;
 }
 .note:hover .status, .status.show { opacity: .75; }
+/* 保存回执：Ctrl+S 之后那一行要用强调色 + 粗一点，扫一眼就知道存住了 */
+.status.ok { opacity: 1; }
+.status.ok #hint { color: var(--accent); font-weight: 600; }
 
 /* ---- 右下角缩放手柄 ---------------------------------------------------- */
 

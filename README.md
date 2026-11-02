@@ -58,6 +58,8 @@ runtime\AutoHotkey64.exe note.ahk
 | 半透明 | 卡片能透出桌面（窗口用 `WS_EX_LAYERED`+`WS_EX_NOREDIRECTIONBITMAP`，页面用 rgba 自绘） |
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
 | 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用、链接、代码块、分割线 |
+| 代码着色 | 代码块自动上色（本地 highlight.js，离线可用）；右键「代码语言」可手动指定，导出 HTML 也带着颜色 |
+| 两套右键菜单 | 正文里是**编辑菜单**（撤销/剪切/复制/粘贴/全选/清除格式），标题栏和其它地方是**便签菜单**（置顶/颜色/导出/删除…） |
 | 插入图片 | 拖文件进来 / `Ctrl+V` 粘截图 / 右键「插入图片…」；图片存 `data\images`，正文只留链接 |
 | 看图 | 正文里的图按 180px 高缩略显示，点一下铺满窗口看原图（再点或 `Esc` 关） |
 | 导出 | 右键「导出」→ TXT / Markdown / HTML / RTF；HTML 会把图片内嵌成 data URI，单文件即可分享 |
@@ -78,11 +80,12 @@ runtime\AutoHotkey64.exe note.ahk
 | 按键 | 作用 |
 |---|---|
 | `Ctrl+B` / `Ctrl+I` / `Ctrl+U` | 加粗 / 斜体 / 下划线 |
-| `Ctrl+S` | 立即保存 |
+| `Ctrl+S` | 立即保存，状态栏回「✓ 已保存 时:分:秒」 |
 | `Ctrl+M` | 切换 Markdown 源码 |
 | `Ctrl+滚轮` | 放大 / 缩小正文字号（也可用右键菜单的「字号」） |
 | `Ctrl+V` | 粘贴截图 / 图片（拖文件到便签里同样可以） |
-| `Esc` | 失焦、保存 |
+| `Shift+Enter` / `Ctrl+Enter` | 光标在代码块里时，直接跳出代码块 |
+| `Esc` | 代码块里 = 跳出；看图时 = 关闭大图；其它情况 = 失焦并保存 |
 
 全局：
 
@@ -113,7 +116,35 @@ runtime\AutoHotkey64.exe note.ahk
 
 ### 右键菜单
 
-**便签窗口**（在窗口任意位置右键，或点 `⋯`）：
+**便签窗口的右键菜单分两套**，按你点在哪儿决定 —— 在正文里弹出"删除这张便签"
+是最容易误点的组合，所以必须分开：
+
+- 点**正文**（编辑区）→ 编辑菜单
+- 点**标题栏 / 工具栏 / 状态栏 / 缩放手柄**，或点 `⋯` → 便签菜单
+
+**编辑菜单**（正文里右键）：
+
+```
+撤销        Ctrl+Z
+重做        Ctrl+Y
+────────────
+剪切        Ctrl+X
+复制        Ctrl+C
+粘贴        Ctrl+V
+删除
+────────────
+全选        Ctrl+A
+清除格式
+────────────
+插入代码块
+代码语言 ›   自动识别 / 纯文本 / JS / TS / Python / HTML / CSS / JSON / Bash …
+             （只有光标在代码块里时才出现，当前语言打勾）
+插入图片…
+────────────
+保存        Ctrl+S
+```
+
+**便签菜单**（标题栏或 `⋯`）：
 
 ```
 新建便签
@@ -124,6 +155,7 @@ runtime\AutoHotkey64.exe note.ahk
 ────────────
 切换 Markdown 源码（源码模式下变成"切换到富文本编辑"）
 复制全文
+保存            Ctrl+S
 插入图片…
 字号  ›        放大 / 缩小 / 恢复默认
 导出  ›        TXT / Markdown / HTML / RTF
@@ -228,7 +260,9 @@ WebView2 的合成确实会有差异，这时才需要退回不透明。
 - **收起的便签仍然占内存**：收起只是隐藏窗口，渲染进程还在。想彻底释放就删除它。
 - **透明窗口没有系统阴影**：阴影只能画在窗口内部（往外画会被窗口边界裁掉），所以用的是内阴影 + 描边。
 - **Win10 上四角可能露出方形底色**：DWM 圆角是 Win11 才有的，Win10 走 CSS 圆角。
-- **不支持粘贴图片**：可以放图片链接 / Markdown 图片语法，但没有把剪贴板位图落盘的能力。
+- **纯文本粘贴照旧走浏览器默认**：只有带图片的粘贴会被接管，粘文字/表格还是 Chromium 自己的行为（表格会被压成纯文本）。
+- **粘贴菜单项靠代按快捷键**：正文右键的「粘贴」会让宿主补发一次真实的 `Ctrl+V`（Chromium 不允许网页自己读剪贴板），所以那一瞬间窗口必须在前台。
+- **代码块正在编辑时不上色**：为了不跳光标，正在打字的那个块保持素色，光标一移开立刻上色。
 - **搜索是 `LIKE` 匹配**：几千张便签以内都很快；再大就需要 FTS5 索引。
 - **单显示器缩放切换**：开了 PerMonitorV2，但跨不同缩放的屏幕拖动时可能有轻微模糊，松开鼠标后恢复。
 - **打开右键菜单时窗口会短暂"卡住"**：原生菜单是同步的，菜单开着期间主线程不处理其他消息
@@ -245,16 +279,21 @@ wv2-notes/
 ├─ lib/
 │  ├─ sqlite.ahk         SQLite 封装（优先用系统 winsqlite3.dll）
 │  ├─ store.ahk          数据访问层（表结构、CRUD、搜索）
-│  ├─ note-window.ahk    一张便签 = 一个 Gui + 一个 WebView2
+│  ├─ note-window.ahk    一张便签 = 一个 Gui + 一个 WebView2（含两套右键菜单）
 │  ├─ list-window.ahk    列表面板（单例）
+│  ├─ settings-window.ahk 设置面板（单例 WebView2，ui\settings.*）
+│  ├─ export.ahk         单张导出：TXT / MD / HTML / RTF
 │  ├─ win.ahk            窗口外观（透明/圆角/工作区/级联落点）
-│  ├─ json.ahk           极简 JSON（只处理扁平字段）
+│  ├─ json.ahk           极简 JSON（只处理扁平字段；大字段走线性扫描，别用正则）
 │  ├─ WebView2/          WebView2 AHK 绑定（第三方，v2.0.5）
 │  └─ WebView2Loader.dll
 ├─ ui/
 │  ├─ note.html/css/js   便签页面
 │  ├─ list.html/css/js   列表页面
-│  └─ md.js              Markdown ⇄ HTML（纯函数，可单测）
+│  ├─ settings.html/css/js 设置面板页面
+│  ├─ md.js              Markdown ⇄ HTML（纯函数，可单测）
+│  ├─ code-hl.js         代码着色（管"什么时候可以重画"，见实现笔记 40）
+│  └─ vendor/            highlight.js 11.9.0 + github 主题（BSD-3-Clause，本地不放 CDN）
 ├─ assets/note.ico       图标
 ├─ runtime/              自带的 AutoHotkey 运行时
 ├─ tools/                冒烟测试、端到端测试、图标生成
@@ -285,8 +324,11 @@ runtime\AutoHotkey64.exe tools\probe-sort.ahk
 # 回归"点完新建就拖不动"：真鼠标点「新建」再拖两个窗口（8 项断言，需先启动 run.bat）
 runtime\AutoHotkey64.exe tools\probe-newbug.ahk
 
-# 菜单：回调参数个数、闭包、菜单项是否都包了包装器（41 项断言，很快）
+# 菜单：回调参数个数、闭包、菜单项是否都包了包装器、两套右键菜单的两端是否对得上（77 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-menu.ahk
+
+# JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界（26 项断言，很快）
+runtime\AutoHotkey64.exe tools\probe-json.ahk
 
 # 程序级自检：收起全部→全部显示，看窗口是不是真回到屏幕上
 runtime\AutoHotkey64.exe note.ahk --selftest-showall
@@ -309,6 +351,9 @@ runtime\AutoHotkey64.exe note.ahk --selftest-rich
 # 程序级自检：粘贴链路 / 图片限高与看大图 / 右上角 X 只收起不删除
 runtime\AutoHotkey64.exe note.ahk --selftest-note
 
+# 程序级自检：大图粘贴(1.9MB base64) / Ctrl+S 回执 / 代码块出路 / 代码着色 / 编辑菜单命令
+runtime\AutoHotkey64.exe note.ahk --selftest-edit
+
 # 程序级自检：四种导出格式（TXT / MD / HTML / RTF）
 runtime\AutoHotkey64.exe note.ahk --selftest-export
 
@@ -317,6 +362,9 @@ runtime\AutoHotkey64.exe note.ahk --selftest-settings
 
 # 给 README 生成设置面板截图（写到 assets\shot-settings.png）
 runtime\AutoHotkey64.exe note.ahk --shot-settings
+
+# 给 README 生成"带代码着色"的便签截图（写到 assets\shot-code.png）
+runtime\AutoHotkey64.exe note.ahk --shot-code
 
 # 数据层
 runtime\AutoHotkey64.exe tools\probe-store.ahk
@@ -559,3 +607,61 @@ pwsh -File tools/make-icon.ps1
     （漏括号）拿到的是**函数对象**，拼进字符串时报 `Expected a String but got a Func`，
     行号还指在日志那一行，很难往这儿想。另外 `Hotkey(KeyName)` 在 2.0.31 上恒返回空串，
     查不到"这个热键注册了没有"，只能靠注册时自己打日志。
+
+37. **`JsonStr` 这类"扁平 JSON 正则"不能碰大字段。** 这是"Ctrl+V 粘图一直没反应"
+    的真正原因：图片 base64 有 800KB~几 MB，`"data"\s*:\s*"(...)"` 这种带嵌套量词
+    的模式在这个量级上会撞 PCRE 的 match limit，直接抛
+    `PCRE execution error.`（日志里只有一行 `未处理异常 [RegExMatch] ... @27`，
+    `@27` 就是 `lib/json.ahk` 第 27 行）。异常从定时器里冒出来没人接，页面永远
+    等不到 `image-ok`，正文里就留一个虚线空图框 —— 看起来像"粘贴功能没做"。
+    现在 `JsonStr` 改成 `InStr` 找键 + 线性找结束引号（跳过 `\"`），4MB 只要 16ms。
+    **教训**：凡是"长度由用户数据决定"的字符串，都不要交给正则。
+    同理 `WriteDataUrl` 也从正则改成了 `InStr` 切一刀。
+    另外 `tools\probe-json.ahk` 专门盯这条：1.6MB / 4MB 各来一遍。
+    `--selftest-edit` 里也改成粘 700×700 噪点图（base64 1.9MB）——
+    之前用 8×8 小图，"自检全绿、用户一粘就废"，因为几百字节根本触发不了这个 bug。
+
+38. **`AreBrowserAcceleratorKeysEnabled = 0` 会把粘贴一起废掉。** Chromium 的粘贴是
+    浏览器侧的编辑命令，关掉快捷键之后 renderer 根本不产生 `paste` 事件，
+    页面里挂再多监听也收不到。要拦 F5/Ctrl+R 就在页面 keydown 里 `preventDefault`。
+    另外 `paste` 事件投给**当前焦点元素**，监听必须挂在 `document`（capture 阶段），
+    挂 `#editor` 的话"点过标题栏再粘"就收不到。
+
+39. **AHK 续行段（`( LTrim Join` ... `)`）里绝对不能写 `//` 注释。** `Join` 是把各行
+    直接拼在一起的，行注释会把**后面所有行**一起注掉，整段 JS 变成语法错误，而
+    `ExecuteScriptAsync` 只会返回 `null` —— 测试里表现为三条断言全挂、看不出原因。
+    要注释就用块注释。
+
+40. **代码着色只在"光标不在那块里"时重画。** contenteditable 里 `<pre>` 一旦重画
+    innerHTML，光标就没了，严重时还会吃掉刚敲的字。所以：
+    · 正在打字的那块**不碰**（暂时是素的），光标一移开（`selectionchange` 里判）
+      立刻补色；
+    · 失焦时把所有块补一遍，导出/保存前看到的也就是成品；
+    · 代码块正文一律"纯文本 + span 外套"，`textContent` 必须一个字符都不变；
+    · 换行用**真换行符**而不是 `<br>`（`pre` 本来就是 `pre-wrap`），
+      但用户按回车时 Chromium 爱插 `<br>`，所以读文本要走 `preText()`，
+      把 `<br>` 折成 `\n` —— 直接用 `textContent` 会把两行粘成一行，
+      导出的 Markdown 就毁了。
+
+41. **代码块"出不来"的三条出路。** `<pre>` 里按回车只会一直加空行，块后面要是没有
+    别的段落，鼠标点下面也没处落。现在：空行回车 / `Shift+Enter` / `Ctrl+Enter` /
+    末尾按 `↓` 都能跳出去，空块按退格直接拆掉；每次插入代码块后还会自动在末尾补一个
+    空段落（`ensureTrailingBlock`，h2/列表/引用/分割线之后同理）。
+
+42. **原生菜单点下去，页面已经没有"用户手势"了。** 所以编辑菜单里的复制/剪切不能
+    用 `navigator.clipboard`（会被拒），而是把选中的文字发给宿主，由 AHK 写
+    `A_Clipboard`；粘贴则反过来 —— `document.execCommand('paste')` 在 Chromium 里
+    永远返回 false（只给扩展放行），`navigator.clipboard.read()` 又要手势，
+    只能让宿主在菜单关掉之后补按一次真实的 `Ctrl+V`。
+
+43. **代码语言有两张表，必须同步。** 宿主 `NoteWindow.CodeLangs()` 只负责画菜单，
+    真干活的是 `ui\code-hl.js` 里的 `LANGS`（调 highlight.js）。
+    对不上就会出现"选了 Python 没反应"。`probe-menu` 会把两张表逐项比对，
+    顺手也把"宿主发得出的每条 `cmd` 页面都能接住"一起验了 —— 这类跨文件约定
+    最容易在改名时悄悄坏掉。
+
+44. **vendor 的 highlight.js 是本地文件，不走 CDN。** `ui\vendor\highlight.min.js`
+    （11.9.0，BSD-3-Clause，121KB，含常用语言）和 `ui\vendor\highlight-github.css`。
+    单机便签断网是常态，引 CDN 等于功能随时消失。导出 HTML 的色板也是直接读这份
+    CSS 内联进去（`Export.HljsCss()`，读不到就退回内置的紧凑色板），
+    两边共用一份，颜色不会慢慢跑偏。

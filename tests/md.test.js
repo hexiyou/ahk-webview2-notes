@@ -109,7 +109,27 @@ for (const w of weird) {
   }
 }
 
-/* ---- 汇总 --------------------------------------------------------------- */
+/* ---- 代码块的语言标记 ---------------------------------------------------
+   语言要写成 class="language-x"（highlight.js 认这个），同时留一份 data-lang
+   给页面"改语言"时读回来。 */
+has('代码块带语言 class', MD.render('```js\nlet a = 1\n```'), 'class="language-js"');
+has('代码块带 data-lang', MD.render('```python\nx = 1\n```'), 'data-lang="python"');
+has('没有语言就不加属性', MD.render('```\nplain\n```'), '<pre><code>');
+eq('语言标记不影响正文', MD.render('```js\nlet a = 1\n```'),
+  '<pre><code class="language-js" data-lang="js">let a = 1</code></pre>');
+has('c++ 这种带符号的语言也认', MD.render('```c++\nint a;\n```'), 'language-c++');
+
+/* preText：代码块里如果混进 <br>（用户按回车时 Chromium 插的），
+   必须折成换行，否则导出的 Markdown 会把整个块挤成一行。
+   这里用假节点树，node 里没有 DOM。 */
+function fakeNode(tag, kids) { return { nodeType: 1, tagName: tag, childNodes: kids }; }
+function fakeText(s) { return { nodeType: 3, nodeValue: s }; }
+const fakePre = fakeNode('PRE', [
+  fakeText('a = 1'), fakeNode('BR', []), fakeText('b = 2'),
+  fakeNode('SPAN', [fakeText(' # 注释')]), fakeNode('BR', [])
+]);
+eq('preText 把 <br> 折成换行', MD.preText(fakePre), 'a = 1\nb = 2 # 注释\n');
+eq('preText 空块', MD.preText(fakeNode('PRE', [])), '');
 console.log('');
 if (fail) {
   for (const f of failures) console.log('  FAIL  ' + f);
