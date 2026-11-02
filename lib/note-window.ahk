@@ -682,8 +682,12 @@ class NoteWindow {
     ShowImageMenu() {
         path := NoteWindow.ImageLocalPath(this.menuImage)
         has := (path != "" && FileExist(path))
+        /* ★ Disable 要传 Add 时的**完整名字**，带 `t 和加速键文本。
+           只写显示名（"复制图片"）会抛 Nonexistent menu item. ——
+           被 try 吞掉之后就是"该灰的没灰"，点了才提示找不到。实测过。 */
+        copyItem := "复制图片`tCtrl+C"
         m := Menu()
-        m.Add("复制图片`tCtrl+C", NoteWindow.MB(ObjBindMethod(this, "CopyImage")))
+        m.Add(copyItem, NoteWindow.MB(ObjBindMethod(this, "CopyImage")))
         m.Add("另存为…", NoteWindow.MB(ObjBindMethod(this, "SaveImageAs")))
         m.Add()
         m.Add("复制文件路径", NoteWindow.MB(ObjBindMethod(this, "CopyImagePath")))
@@ -694,7 +698,7 @@ class NoteWindow {
            点下去只弹一句"找不到"比直接看见是灰的还让人困惑。 */
         if !has {
             try {
-                m.Disable("复制图片")
+                m.Disable(copyItem)
                 m.Disable("另存为…")
                 m.Disable("复制文件路径")
                 m.Disable("在文件夹中显示")

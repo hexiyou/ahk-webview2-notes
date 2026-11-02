@@ -421,7 +421,7 @@ runtime\AutoHotkey64.exe tools\probe-sort.ahk
 # 回归"点完新建就拖不动"：真鼠标点「新建」再拖两个窗口（8 项断言，需先启动 run.bat）
 runtime\AutoHotkey64.exe tools\probe-newbug.ahk
 
-# 菜单：回调参数个数、闭包、菜单项是否都包了包装器、三套右键菜单的两端是否对得上（130 项断言，很快）
+# 菜单：回调参数个数、闭包、菜单项是否都包了包装器、三套右键菜单的两端是否对得上（131 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-menu.ahk
 
 # JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界 / 键存在性（35 项断言，很快）
@@ -984,3 +984,9 @@ pwsh -File tools/make-icon.ps1
     `e.target.tagName === 'IMG'`，之后才走原来的两套。
     删图走 `execCommand('delete')`（进浏览器撤销栈，误删能 Ctrl+Z），不要 `el.remove()`
     直接撸 DOM —— 那样删完就真没了。图片文件本身不删：同一条便签可能引用了两次。
+
+69. **`Menu.Disable` 认的是 `Add` 时的完整名字，包括 `\t` 和加速键文本。** 给
+    `m.Add("复制图片`tCtrl+C", …)` 之后写 `m.Disable("复制图片")` 会抛
+    `Nonexistent menu item.`；被 `try` 吞掉之后表现是"该灰的项没灰"，用户点下去才发现
+    找不到文件。`probe-menu` 里专门留了一条断言钉这个规则。
+    顺便记一下：菜单项回调要套 `MB()`（笔记 44）、菜单只能在独立线程里 `Show`。

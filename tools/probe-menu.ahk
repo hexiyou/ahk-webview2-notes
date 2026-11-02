@@ -361,6 +361,23 @@ for f in [imgProbe, saveProbe, noext ".png"]
     if FileExist(f)
         FileDelete f
 
+; 图片菜单里"文件找不到就灰掉"用到 Menu.Disable。它认的是 Add 时的**完整名字**
+; （`t + 加速键文本），只写显示名会抛 "Nonexistent menu item." —— 被 try 吞掉后
+; 表现是"该灰的没灰"，点了才提示。这条断言把规则钉住。
+mm := Menu()
+mm.Add("甲`tCtrl+1", (*) => 0)
+byName := 0, byFull := 0
+try {
+    mm.Disable("甲")
+    byName := 1
+}
+try {
+    mm.Disable("甲`tCtrl+1")
+    byFull := 1
+}
+Check("Menu.Disable 必须传带加速键的完整名字"
+    , byName = 0 && byFull = 1, "显示名=" byName " 完整串=" byFull)
+
 App.Log("=== 结束：PASS " PassN " / FAIL " FailN)
 Sleep 150
 ExitApp FailN ? 1 : 0
