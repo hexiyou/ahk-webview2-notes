@@ -258,6 +258,7 @@ class ListWindow {
         m.Add("全部显示", ListWindow.Cb(ListMenuShowAll()))
         m.Add("全部收起", ListWindow.Cb(ListMenuHideAll()))
         m.Add()
+        m.Add("设置…", ListWindow.Cb(ListMenuSettings()))
         m.Add("打开数据目录", ListWindow.Cb(ListMenuDataDir()))
         m.Show()
     }
@@ -359,4 +360,10 @@ ListMenuHideAll() {
 
 ListMenuDataDir() {
     return () => ListWindow.Call("onDataDir")
+}
+
+; 设置面板要建 WebView2 controller（内部 await），宿主的 onSettings 自己会
+; 用 SetTimer 挪出菜单回调，这里只管转发。
+ListMenuSettings() {
+    return () => ListWindow.Call("onSettings")
 }
