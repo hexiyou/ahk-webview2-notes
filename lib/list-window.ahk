@@ -16,6 +16,9 @@ class ListWindow {
     static Hooks := 0
     static Win := 0
     static Query := ""
+    /* 列表窗口自己的置顶。和便签的置顶不是一回事：那个是每条便签的字段（存库里），
+       这个是窗口偏好，存在 config.ini 的 [window] listTopmost，下次开还置顶。 */
+    static Topmost := 0
 
     static IsOpen() => ListWindow.Win ? 1 : 0
 
@@ -38,7 +41,10 @@ class ListWindow {
             }
         }
         ctx := ListWindow.Ctx
-        g := Gui("-Caption +Resize", "便签列表")
+        ; 置顶是窗口偏好，开窗前就要定下来（Gui 的 +AlwaysOnTop 只能在创建时给，
+        ; 之后补 WinSetAlwaysOnTop 也行，但会闪一下）
+        ListWindow.Topmost := App.Cfg("window", "listTopmost", 0) ? 1 : 0
+        g := Gui("-Caption +Resize" (ListWindow.Topmost ? " +AlwaysOnTop" : ""), "便签列表")
         g.MarginX := 0
         g.MarginY := 0
         g.BackColor := "0xFFFDF8EE"
@@ -95,6 +101,29 @@ class ListWindow {
             ListWindow.Win.wvc.Fill()
             ListWindow.Win.wvc.IsVisible := 1
         }
+    }
+
+    /* 切换列表窗口的置顶。窗口不在也照样记下偏好（下次打开就是置顶的），
+       config.ini 写盘是 IniWrite，很便宜，不做合并。 */
+    static SetTopmost(on) {
+        on := on ? 1 : 0
+        if (on = ListWindow.Topmost)
+            return
+        ListWindow.Topmost := on
+        if ListWindow.Win
+            try WinSetAlwaysOnTop(on, "ahk_id " ListWindow.Win.gui.Hwnd)
+        try App.SetCfg("window", "listTopmost", on)
+        if ListWindow.Win {
+            try ListWindow.Win.wv.PostWebMessageAsJson(
+                '{"type":"topmost","on":' (on ? "true" : "false") '}')
+            ; 置顶/取消置顶会改变 z 序，重新激活一下，免得窗口沉到后面去了
+            if on
+                try WinActivate("ahk_id " ListWindow.Win.gui.Hwnd)
+        }
+    }
+
+    static ToggleTopmost() {
+        ListWindow.SetTopmost(!ListWindow.Topmost)
     }
 
     static Close() {
@@ -190,6 +219,8 @@ class ListWindow {
                     ListWindow.Call("onDataDir")
                 case "menu":
                     ListWindow.ShowMenu(JsonNum(raw, "id"))
+                case "window-topmost":
+                    ListWindow.SetTopmost(JsonNum(raw, "on"))
                 case "close":
                     ListWindow.Close()
             }
@@ -230,7 +261,10 @@ class ListWindow {
             m.Add()
             m.Add(n.pinned ? "取消置顶" : "置顶", ListWindow.Cb(ListMenuPin(id, n.pinned ? 0 : 1)))
             sub := Menu()
-            for cname, hex in NoteWindow.Colors() {
+            ; 顺序走 ColorKeys()：Map 的遍历顺序是哈希序，不排会每次换位置
+            for cname in NoteWindow.ColorKeys() {
+                if !NoteWindow.IsColor(cname)
+                    continue
                 sub.Add(NoteWindow.ColorLabel(cname), ListWindow.Cb(ListMenuColor(id, cname)))
                 if (cname = n.color)
                     sub.Check(NoteWindow.ColorLabel(cname))
@@ -258,6 +292,10 @@ class ListWindow {
         m.Add("全部显示", ListWindow.Cb(ListMenuShowAll()))
         m.Add("全部收起", ListWindow.Cb(ListMenuHideAll()))
         m.Add()
+        m.Add("窗口置顶", ListWindow.Cb(ListMenuTopmost()))
+        if ListWindow.Topmost
+            m.Check("窗口置顶")
+        m.Add()
         m.Add("设置…", ListWindow.Cb(ListMenuSettings()))
         m.Add("打开数据目录", ListWindow.Cb(ListMenuDataDir()))
         m.Show()
@@ -269,7 +307,8 @@ class ListWindow {
             return
         appr := ListWindow.Ctx ? ListWindow.Ctx.appearance : 0
         drag := (appr && appr.drag) ? appr.drag : "manual"
-        json := '{"type":"init","drag":' JsonQuote(drag) '}'
+        json := '{"type":"init","drag":' JsonQuote(drag)
+            . ',"topmost":' (ListWindow.Topmost ? 1 : 0) '}'
         try ListWindow.Win.wv.PostWebMessageAsJson(json)
     }
 
@@ -366,4 +405,9 @@ ListMenuDataDir() {
 ; 用 SetTimer 挪出菜单回调，这里只管转发。
 ListMenuSettings() {
     return () => ListWindow.Call("onSettings")
+}
+
+; 窗口置顶：直接切，不用绕回宿主 —— 它只动窗口样式 + config.ini
+ListMenuTopmost() {
+    return () => ListWindow.ToggleTopmost()
 }

@@ -30,7 +30,9 @@
       else if (msg && msg.type === 'init') {
         // manual = 顶栏交给 JS 拖；native = 还给 -webkit-app-region（见 list.css）
         document.body.dataset.drag = msg.drag === 'native' ? 'native' : 'manual';
+        setTopmost(msg.topmost);
       }
+      else if (msg && msg.type === 'topmost') setTopmost(msg.on);
       else if (msg && msg.type === 'refresh') send({ type: 'search', q: query });
     });
   }
@@ -170,6 +172,20 @@
   $('btnNew').addEventListener('click', () => send({ type: 'new' }));
   $('btnClose').addEventListener('click', () => send({ type: 'close' }));
   $('btnMenu').addEventListener('click', () => send({ type: 'menu', id: 0 }));
+
+  /* ---- 窗口置顶 ---------------------------------------------------------
+     状态由宿主说了算：点一下只说"想变成什么"，宿主改完窗口样式再回一条
+     {type:'topmost'} 把按钮点亮/熄掉。别在这里自己翻 class —— 页面和窗口
+     一旦不同步，按钮显示的就不是真实状态。 */
+  const pinEl = $('btnPin');
+  function setTopmost(on) {
+    pinEl.classList.toggle('on', !!on);
+    pinEl.setAttribute('aria-pressed', on ? 'true' : 'false');
+    pinEl.title = on ? '窗口已置顶（点击取消）' : '窗口置顶（置顶后不会被其他窗口盖住）';
+  }
+  pinEl.addEventListener('click', () => {
+    send({ type: 'window-topmost', on: pinEl.classList.contains('on') ? 0 : 1 });
+  });
 
   /* 右键：点在条目上出该条目的菜单，点空白/头部出面板菜单（id=0）。
      菜单本体由宿主用系统原生菜单弹出。 */

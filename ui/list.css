@@ -67,6 +67,11 @@ button.icon {
 }
 button.icon:hover { background: rgba(0, 0, 0, .07); color: var(--fg); }
 
+/* 置顶按钮：开着的时候用强调色，一眼能看出列表会盖住别的窗口 */
+button.icon.on { color: var(--accent); background: rgba(184, 134, 11, .14); }
+button.icon.on:hover { background: rgba(184, 134, 11, .2); color: var(--accent); }
+button.icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 button.primary {
   height: 28px;
   padding: 0 14px;

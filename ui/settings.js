@@ -15,6 +15,8 @@
 
   const statusEl = $('status');
   let statusTimer = 0;
+  /* 新建便签的默认颜色（宿主发来的键名，比如 yellow） */
+  let defColor = 'yellow';
 
   function send(obj) {
     if (bridge) bridge.postMessage(obj);
@@ -47,6 +49,8 @@
     $('fontSize').value = cfg.fontSize || 15;
     $('showAllOnStart').checked = !!cfg.showAllOnStart;
     $('openListOnStart').checked = !!cfg.openListOnStart;
+    defColor = cfg.defColor || 'yellow';
+    buildSwatches(cfg.colors || []);
     $('hkNew').value = cfg.hkNew || '';
     $('hkList').value = cfg.hkList || '';
     $('hkToggle').value = cfg.hkToggle || '';
@@ -56,6 +60,39 @@
     // 填值时浏览器可能把某个控件滚进视野，导致一打开就停在中间
     const body = $('body');
     if (body) body.scrollTop = 0;
+  }
+
+  /* ---- 新建便签的默认颜色 -----------------------------------------------
+     色块完全按宿主发来的表画（颜色名/中文名/色值只在 AHK 的
+     NoteWindow.Colors() 里定义一次），页面这边不抄表，改名或加颜色都不会漏。 */
+
+  function buildSwatches(colors) {
+    const box = $('swatches');
+    if (!box) return;
+    box.textContent = '';
+    for (const c of colors) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip';
+      b.dataset.key = c.k;
+      b.title = c.n;
+      b.setAttribute('aria-label', c.n);
+      b.style.background = '#' + c.h;
+      b.addEventListener('click', () => {
+        defColor = c.k;
+        paintSwatches();
+      });
+      box.appendChild(b);
+    }
+    paintSwatches();
+  }
+
+  function paintSwatches() {
+    document.querySelectorAll('#swatches .chip').forEach(ch => {
+      const on = ch.dataset.key === defColor;
+      ch.classList.toggle('on', on);
+      ch.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
   }
 
   function collect() {
@@ -68,6 +105,7 @@
       fontSize: fs,
       showAllOnStart: $('showAllOnStart').checked ? 1 : 0,
       openListOnStart: $('openListOnStart').checked ? 1 : 0,
+      defColor: defColor,
       hkNew: $('hkNew').value.trim(),
       hkList: $('hkList').value.trim(),
       hkToggle: $('hkToggle').value.trim()
@@ -157,6 +195,8 @@
     $('fontSize').value = 15;
     $('showAllOnStart').checked = false;
     $('openListOnStart').checked = false;
+    defColor = 'yellow';
+    paintSwatches();
     $('hkNew').value = '^!n';
     $('hkList').value = '^!l';
     $('hkToggle').value = '^!h';

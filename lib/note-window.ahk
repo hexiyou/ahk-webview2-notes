@@ -520,7 +520,10 @@ class NoteWindow {
         m.Add(this.note.pinned ? "取消置顶" : "置顶"
             , NoteWindow.MB(ObjBindMethod(this, "TogglePin")))
         sub := Menu()
-        for name, hex in NoteWindow.Colors() {
+        ; 按 ColorKeys() 的顺序排（Map 遍历顺序是哈希序，会每次开机换位置）
+        for name in NoteWindow.ColorKeys() {
+            if !NoteWindow.IsColor(name)
+                continue
             sub.Add(NoteWindow.ColorLabel(name)
                 , NoteWindow.MB(ObjBindMethod(this, "DoColor", name)))
             if (name = this.note.color)
@@ -734,6 +737,14 @@ class NoteWindow {
     }
 
     ; ---- 颜色表 -------------------------------------------------------------
+
+    /* 显示顺序单独列一份。AHK v2 的 Map 是哈希表，遍历顺序**不是**插入顺序
+       （实测 Map("yellow",..., "pink",...) 第一个出来的是 blue），
+       菜单和设置面板要是照着遍历，六个颜色每次开机都换位置。
+       新增颜色时两边都要加，probe-menu 会盯着这张表和 Colors() 是否对得上。 */
+    static ColorKeys() {
+        return ["yellow", "pink", "blue", "green", "purple", "gray"]
+    }
 
     static Colors() {
         return Map(

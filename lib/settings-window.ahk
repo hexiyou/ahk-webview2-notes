@@ -32,7 +32,10 @@ class SettingsWindow {
         }
 
         ctx := SettingsWindow.Ctx
-        g := Gui("-Caption +Resize", "设置")
+        /* 列表窗口置顶时，从它打开的设置面板也得盖在它上面 —— 否则点完
+           「设置…」什么都没看见，像是没反应。 */
+        top := (ListWindow.IsOpen() && ListWindow.Topmost) ? 1 : 0
+        g := Gui("-Caption +Resize" (top ? " +AlwaysOnTop" : ""), "设置")
         g.MarginX := 0
         g.MarginY := 0
         g.BackColor := "0xFFFDF8EE"
@@ -109,17 +112,32 @@ class SettingsWindow {
     }
 
     /* 把所有配置项打包发给页面。数值型原样发（JSON 里不能加引号），
-       字符串走 JsonQuote。 */
+       字符串走 JsonQuote。颜色表也是这里发 —— 六个颜色名/中文名/色值只在
+       NoteWindow.Colors() 里定义一次，页面照着画色块，不再抄一份表。 */
     static PushInit() {
         j := '{"type":"init","cfg":{'
         j .= '"transparent":' (App.Cfg("appearance", "transparent", 1) ? 1 : 0) ','
         j .= '"fontSize":' App.Cfg("appearance", "fontSize", 15) ','
         j .= '"showAllOnStart":' (App.Cfg("app", "showAllOnStart", 0) ? 1 : 0) ','
         j .= '"openListOnStart":' (App.Cfg("app", "openListOnStart", 0) ? 1 : 0) ','
+        j .= '"defColor":' JsonQuote(App.Cfg("window", "color", "yellow")) ','
         j .= '"hkNew":' JsonQuote(App.Cfg("hotkey", "new", "^!n")) ','
         j .= '"hkList":' JsonQuote(App.Cfg("hotkey", "list", "^!l")) ','
-        j .= '"hkToggle":' JsonQuote(App.Cfg("hotkey", "toggle", "^!h"))
-        j .= '},"info":{'
+        j .= '"hkToggle":' JsonQuote(App.Cfg("hotkey", "toggle", "^!h")) ','
+        j .= '"colors":['
+        all := NoteWindow.Colors()
+        first := true
+        ; 按 ColorKeys() 排：色块顺序固定，用户下次打开还是同一个位置
+        for key in NoteWindow.ColorKeys() {
+            if !all.Has(key)
+                continue
+            if !first
+                j .= ","
+            first := false
+            label := NoteWindow.ColorLabel(key)
+            j .= '{"k":' JsonQuote(key) ',"n":' JsonQuote(label) ',"h":' JsonQuote(all[key]) '}'
+        }
+        j .= ']},"info":{'
         j .= '"dataDir":' JsonQuote(App.DataDir) ','
         j .= '"about":' JsonQuote("QuickNote · AHK " A_AhkVersion " · SQLite "
             . Sqlite.Version() " · 当前 " App.Store.Count() " 张便签")

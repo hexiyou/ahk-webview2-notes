@@ -141,6 +141,32 @@ input[type="checkbox"] {
 
 .unit { color: var(--fg-dim); }
 
+/* 默认颜色色块：六个小圆点，选中的加一圈描边（内圈用纸张色隔开，外圈强调色） */
+.swatches {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.chip {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, .13);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform .12s, box-shadow .12s;
+}
+
+.chip:hover { transform: scale(1.08); }
+
+.chip.on {
+  box-shadow: 0 0 0 2px var(--card), 0 0 0 3.5px var(--accent);
+}
+
+.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
 /* 快捷键录制框：只读，按键由 JS 翻译成 AHK 写法 */
 .hk {
   width: 132px;

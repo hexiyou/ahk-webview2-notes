@@ -117,8 +117,31 @@ for m in ["ShowMenu", "TogglePin", "DoPin", "ApplyPin", "DoColor", "ApplyColor"
     Check("NoteWindow 有方法 " m, NoteWindow.Prototype.HasMethod(m))
 Check("NoteWindow 有静态方法 MB", NoteWindow.HasMethod("MB"))
 
-for m in ["ShowMenu", "Call", "Cb", "Push", "Open", "Close"]
+for m in ["ShowMenu", "Call", "Cb", "Push", "Open", "Close", "SetTopmost", "ToggleTopmost"]
     Check("ListWindow 有方法 " m, ListWindow.HasMethod(m))
+Check("列表窗口置顶状态默认是关", ListWindow.Topmost = 0, ListWindow.Topmost)
+
+; 颜色表要和"显示顺序表"对得上：漏一个就会出现"菜单里少了个颜色"
+; 注意别用 HasVal()：这个 AHK 版本没有它，#Warn 会当成未赋值变量弹模态框，
+; 整个探针就卡在那儿了（第一次写就踩了）。
+cAll := NoteWindow.Colors()
+cKeys := NoteWindow.ColorKeys()
+missing := ""
+for k, _ in cAll {
+    hit := 0
+    for k2 in cKeys
+        if (k2 = k)
+            hit := 1
+    if !hit
+        missing .= " " k
+}
+badKey := ""
+for k in cKeys
+    if !cAll.Has(k)
+        badKey .= " " k
+Check("ColorKeys 覆盖全部颜色", missing = "", missing = "" ? cKeys.Length " 项" : "缺" missing)
+Check("ColorKeys 里没有不存在的颜色名", badKey = "", badKey)
+Check("颜色个数是 6", cAll.Count = 6, cAll.Count)
 
 ; 顶层包装（列表窗口的 Hooks 里放的就是这些函数对象）。note.ahk 不 include
 ; 进测试（它会直接启动整个程序），所以按源码声明检查。
@@ -187,6 +210,31 @@ Check("ShowAll 不再用 Store.Visible()（会导致收起后再也点不出来�
 noteJs := FileRead(A_ScriptDir "\..\ui\note.js", "UTF-8")
 listJs := FileRead(A_ScriptDir "\..\ui\list.js", "UTF-8")
 Check("便签页有 contextmenu → menu", InStr(noteJs, "contextmenu") > 0 && InStr(noteJs, "type: 'menu'") > 0)
+
+; ---------------------------------------------------------------------------
+; 6b. 列表窗口的置顶按钮 / 设置页的颜色色块
+;     这两处都是"宿主发一个东西、页面照着做"，最容易在改名后悄悄断掉。
+; ---------------------------------------------------------------------------
+
+Check("列表页有置顶按钮", InStr(listJs, "btnPin") > 0)
+Check("列表页点置顶发 window-topmost", InStr(listJs, "window-topmost") > 0)
+Check("列表页会跟着宿主的 topmost 消息刷新按钮", InStr(listJs, "type === 'topmost'") > 0)
+Check("列表页 init 里读了置顶状态", InStr(listJs, "setTopmost(msg.topmost)") > 0)
+
+settingsHtml := FileRead(A_ScriptDir "\..\ui\settings.html", "UTF-8")
+settingsJs := FileRead(A_ScriptDir "\..\ui\settings.js", "UTF-8")
+settingsWin := FileRead(A_ScriptDir "\..\lib\settings-window.ahk", "UTF-8")
+Check("设置页有颜色色块容器", InStr(settingsHtml, "id=`"swatches`"") > 0)
+Check("设置页按宿主颜色表画色块（不自己抄表）"
+    , InStr(settingsJs, "buildSwatches") > 0 && InStr(settingsJs, "cfg.colors") > 0)
+Check("设置页保存时带上 defColor", InStr(settingsJs, "defColor: defColor") > 0)
+Check("设置窗口按 ColorKeys() 下发颜色表", InStr(settingsWin, "NoteWindow.ColorKeys()") > 0)
+
+; 重命名对话框必须是"能置顶"的那一版，且置顶与否跟着便签/列表走
+Check("App 里有可置顶的 AskText", RegExMatch(srcNote, "(?m)^    static AskText\(") > 0)
+Check("重命名走 AskText，不再是 InputBox", InStr(srcNote, "App.AskText(") > 0)
+Check("置顶判断同时看便签和列表窗口"
+    , InStr(srcNote, "note.pinned") > 0 && InStr(srcNote, "ListWindow.Topmost") > 0)
 
 ; ---------------------------------------------------------------------------
 ; 7. 右键菜单分两套：正文给"编辑菜单"，其它地方给"便签菜单"

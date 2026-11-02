@@ -145,6 +145,8 @@ class App {
             SetTimer(SelfTestExport, -2500)
         if App.HasArg("--selftest-settings")
             SetTimer(SelfTestSettings, -2500)
+        if App.HasArg("--selftest-dialog")
+            SetTimer(SelfTestDialog, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -323,6 +325,46 @@ class App {
             NoteWindow.All[id].ApplyColor(color)
     }
 
+    /* ---- 输入框（可置顶） -----------------------------------------------------
+       AHK 自带的 InputBox 只认 w/h/x/y/T 这几种 Options，**不接受 Gui 的
+       "+AlwaysOnTop"**（试过：直接抛 "Invalid option."）。于是便签一置顶，
+       重命名对话框就被自己的便签盖在底下 —— 用户看不到自己在改什么。
+       这里用普通 Gui 搭一个同样用途的小对话框，topmost=1 时整窗带 WS_EX_TOPMOST。
+
+       几处细节照着 InputBox 的手感来做：
+         · 回车 = 确定（按钮的 Default 选项），Esc = 取消（Gui 的 Escape 事件）
+         · 打开时全选原有标题，直接打字就整段替换（EM_SETSEL 0,-1）
+         · 用 WinWaitClose 把调用线程停住，调用方拿到的就是"用户已经答完了" */
+    static AskText(title, prompt, def, topmost := 0) {
+        res := { ok: 0, value: "" }
+        g := Gui((topmost ? "+AlwaysOnTop " : "") "+ToolWindow -MinimizeBox -MaximizeBox", title)
+        g.MarginX := 16
+        g.MarginY := 14
+        g.SetFont("s10", "Microsoft YaHei UI")
+        g.Add("Text", "w376", prompt)
+        ed := g.Add("Edit", "w376", def)
+        okBtn := g.Add("Button", "w84 x224 y+14 Default", "确定")
+        cancelBtn := g.Add("Button", "w84 x+8", "取消")
+
+        Submit(*) {
+            res.value := ed.Value
+            res.ok := 1
+            g.Destroy()
+        }
+        okBtn.OnEvent("Click", Submit)
+        cancelBtn.OnEvent("Click", (*) => g.Destroy())
+        g.OnEvent("Escape", (*) => g.Destroy())
+        g.OnEvent("Close", (*) => g.Destroy())
+
+        g.Show("AutoSize Center")
+        ed.Focus()
+        PostMessage(0x00B1, 0, -1, ed)          ; EM_SETSEL：全选
+        WinWaitClose("ahk_id " g.Hwnd)
+
+        ; 已经 Destroy 过的 Gui 再碰就抛错，这里只需要把对象放掉
+        return res
+    }
+
     /* ---- 标题 ---------------------------------------------------------------
        标题默认是"正文第一行的前 60 字"自动派生的，所以以前根本没有改名字的入口。
        手动指定后 Store 会把 title_locked 置 1，之后正文怎么变都不再覆盖它；
@@ -335,11 +377,17 @@ class App {
         }
         hintText := n.title_locked ? "留空 = 恢复按正文第一行自动取标题"
             : "留空 = 保持现在的自动标题"
-        r := InputBox("给这张便签起个名字（列表里就显示这个）`n`n" hintText
-            , "重命名便签", "w420 h170", n.title)
-        if (r.Result = "Cancel")
+        ; 置顶的便签 + 置顶的列表窗口，都会把普通对话框盖住，所以跟着一起置顶
+        top := 0
+        if NoteWindow.All.Has(id) && NoteWindow.All[id].note.pinned
+            top := 1
+        if ListWindow.IsOpen() && ListWindow.Topmost
+            top := 1
+        r := App.AskText("重命名便签"
+            , "给这张便签起个名字（列表里就显示这个）`n" hintText, n.title, top)
+        if !r.ok
             return
-        name := Trim(r.Value)
+        name := Trim(r.value)
         if (name = "") {
             t := App.Store.ClearTitle(id)
             App.Toast(t = "" ? "已恢复自动标题" : "已恢复自动标题：" t)
@@ -405,6 +453,14 @@ class App {
         App.SetCfg("app", "showAllOnStart", showAll)
         App.SetCfg("app", "openListOnStart", openList)
 
+        /* 新建便签的默认颜色：消息里没带这一项就沿用当前值（老版本页面/自检
+           都不会把它清成黄色）。非法名字直接当没填。
+           NewNote 每次都现读 config.ini，所以写完立即生效，不用重建窗口。 */
+        dc := Trim(JsonStr(raw, "defColor", App.Cfg("window", "color", "yellow")))
+        if !NoteWindow.IsColor(dc)
+            dc := App.Cfg("window", "color", "yellow")
+        App.SetCfg("window", "color", dc)
+
         App.SetFontSize(fs)
         App.RebindHotkeys(hs)
 
@@ -416,7 +472,7 @@ class App {
             SetTimer(NoteReloadTick, -10)
         }
         App.Log("设置已保存：字号 " fs "，透明 " tr
-            "，启动显示全部 " showAll "，启动开列表 " openList)
+            "，默认颜色 " dc "，启动显示全部 " showAll "，启动开列表 " openList)
         return ""
     }
 
@@ -765,7 +821,10 @@ class App {
         text .= "width=300`r`n"
         text .= "height=280`r`n"
         text .= "; 默认颜色：yellow / pink / blue / green / purple / gray`r`n"
-        text .= "color=yellow`r`n`r`n"
+        text .= "; 设置面板里的「新建便签的颜色」改的就是这一项`r`n"
+        text .= "color=yellow`r`n"
+        text .= "; 列表窗口是否置顶（列表右上角的图钉按钮也会改这里）`r`n"
+        text .= "listTopmost=0`r`n`r`n"
         text .= "[hotkey]`r`n"
         text .= "; 留空表示不注册该热键`r`n"
         text .= "new=^!n`r`n"
@@ -1322,6 +1381,7 @@ SelfTestSettingsRun() {
     oldFs := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
     oldHk := App.Cfg("hotkey", "new", "^!n")
     oldAll := App.Cfg("app", "showAllOnStart", 0)
+    oldColor := App.Cfg("window", "color", "yellow")
 
     App.ShowSettings()
     Sleep 2600
@@ -1339,6 +1399,16 @@ SelfTestSettingsRun() {
     RichSay("页面读到了字号", fsInPage = String(oldFs), fsInPage " vs " oldFs)
     RichSay("页面读到了热键", hkInPage = oldHk, hkInPage " vs " oldHk)
 
+    ; 默认颜色色块：个数跟 NoteWindow.Colors() 对上，当前值被点亮
+    chips := JStr(RichEval(w, "document.querySelectorAll('#swatches .chip').length"))
+    RichSay("页面画出了 6 个颜色色块", chips = String(NoteWindow.Colors().Count), chips)
+    chipOn := JStr(RichEval(w, "(function(){var c=document.querySelector('#swatches .chip.on');"
+        . "return c?c.dataset.key:'-'})()"))
+    RichSay("当前默认颜色被点亮", chipOn = oldColor, chipOn " vs " oldColor)
+    chipHex := JStr(RichEval(w, "(function(){var c=document.querySelector('#swatches .chip');"
+        . "return c?c.style.background:'-'})()"))
+    RichSay("色块用的是宿主给的色值（rgb 形式）", InStr(chipHex, "rgb") > 0, chipHex)
+
     ; 非法热键：应当报错，且配置不被改坏
     badRaw := '{"type":"save","fontSize":19,"transparent":1,"showAllOnStart":0,'
         . '"openListOnStart":0,"hkNew":"Ctrl+","hkList":"","hkToggle":""}'
@@ -1348,12 +1418,15 @@ SelfTestSettingsRun() {
     RichSay("拦截后原热键仍注册着", App.Bound.Has("new") && App.Bound["new"] = oldHk,
         App.Bound.Has("new") ? App.Bound["new"] : "(无)")
 
-    ; 合法保存：字号 + 新热键 + 启动显示全部
+    ; 合法保存：字号 + 新热键 + 启动显示全部 + 默认颜色改成蓝色
     goodRaw := '{"type":"save","fontSize":18,"transparent":1,"showAllOnStart":1,'
-        . '"openListOnStart":0,"hkNew":"^!j","hkList":"^!l","hkToggle":""}'
+        . '"openListOnStart":0,"defColor":"blue",'
+        . '"hkNew":"^!j","hkList":"^!l","hkToggle":""}'
     err2 := App.ApplySettings(goodRaw)
     RichSay("合法配置保存成功", err2 = "", err2)
     RichSay("字号立即生效", App.Ctx.appearance.fontSize = 18, App.Ctx.appearance.fontSize)
+    RichSay("默认颜色已落盘", App.Cfg("window", "color", "yellow") = "blue",
+        App.Cfg("window", "color", "yellow"))
     ; 落盘是 400ms 合并写（按住 Ctrl+滚轮 会连发几十次），所以等一下再看文件
     Sleep 700
     RichSay("字号已落盘", App.Cfg("appearance", "fontSize", 0) = 18,
@@ -1366,11 +1439,21 @@ SelfTestSettingsRun() {
     ; 改回来
     backRaw := '{"type":"save","fontSize":' oldFs ',"transparent":1,'
         . '"showAllOnStart":' (oldAll ? 1 : 0) ',"openListOnStart":0,'
+        . '"defColor":' JsonQuote(oldColor) ','
         . '"hkNew":' JsonQuote(oldHk) ',"hkList":"^!l","hkToggle":"^!h"}'
     err3 := App.ApplySettings(backRaw)
     RichSay("恢复原配置", err3 = "", err3)
     RichSay("恢复后热键回来了", App.Bound.Has("new") && App.Bound["new"] = oldHk,
         App.Bound.Has("new") ? App.Bound["new"] : "(无)")
+    RichSay("默认颜色已恢复", App.Cfg("window", "color", "blue") = oldColor,
+        App.Cfg("window", "color", "blue"))
+
+    ; 没带 defColor 的老消息不能把默认颜色清成黄色
+    App.ApplySettings('{"type":"save","fontSize":' oldFs ',"transparent":1,'
+        . '"showAllOnStart":' (oldAll ? 1 : 0) ',"openListOnStart":0,'
+        . '"hkNew":' JsonQuote(oldHk) ',"hkList":"^!l","hkToggle":"^!h"}')
+    RichSay("消息里没带默认颜色时保持不变",
+        App.Cfg("window", "color", "yellow") = oldColor, App.Cfg("window", "color", "yellow"))
     ; 字号写盘是 400ms 合并的，不等一下就直接退出进程，定时器被掐掉，
     ; 配置会停在测试值上（第一次跑就踩了：用户拿到的是 18）
     Sleep 700
@@ -1382,6 +1465,95 @@ SelfTestSettingsRun() {
     RichSay("设置窗口能关掉", SettingsWindow.IsOpen() = 0)
 
     App.Log("SELFTEST SETTINGS 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+}
+
+/* 自检：可置顶的重命名输入框。
+   关窗用 PostMessage(WM_CLOSE)，不用 SendInput —— 本机注入真按键会卡死
+   （前几轮踩过），而这里要验的只是"窗口出来了、置顶位对不对、能不能正常取消"。 */
+SelfTestDialog() {
+    try SelfTestDialogRun()
+    catch as e {
+        App.Log("SELFTEST DIALOG 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST DIALOG 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+global DlgSeen := 0, DlgTop := -1
+
+/* 跑在独立定时器线程里：等对话框出现，记下它的置顶位，然后关掉它。
+   AskText 里 WinWaitClose 会把调用线程停住，但定时器线程照样能进来。 */
+DialogProbeTick(title) {
+    global DlgSeen, DlgTop
+    hwnd := 0
+    Loop 120 {
+        hwnd := WinExist(title)
+        if hwnd
+            break
+        Sleep 25
+    }
+    if !hwnd {
+        DlgSeen := 0
+        return
+    }
+    DlgSeen := 1
+    DlgTop := (WinGetExStyle("ahk_id " hwnd) & 0x8) ? 1 : 0     ; WS_EX_TOPMOST
+    PostMessage(0x0010, 0, 0, , "ahk_id " hwnd)                  ; WM_CLOSE
+}
+
+SelfTestDialogRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    global DlgSeen, DlgTop
+
+    ; 1) 便签置顶时用的那一版：整窗带 WS_EX_TOPMOST
+    DlgSeen := 0, DlgTop := -1
+    SetTimer(DialogProbeTick.Bind("重命名便签（置顶测试）"), -120)
+    r := App.AskText("重命名便签（置顶测试）", "随便写点", "旧标题", 1)
+    RichSay("置顶对话框确实弹出来了", DlgSeen = 1, DlgSeen)
+    RichSay("置顶对话框带 WS_EX_TOPMOST", DlgTop = 1, DlgTop)
+    RichSay("关窗时按取消处理（ok=0）", r.ok = 0, r.ok)
+
+    ; 2) 普通版：不该带置顶位（否则会盖住别的程序）
+    DlgSeen := 0, DlgTop := -1
+    SetTimer(DialogProbeTick.Bind("重命名便签（普通测试）"), -120)
+    r2 := App.AskText("重命名便签（普通测试）", "随便写点", "旧标题", 0)
+    RichSay("普通对话框也能弹出来", DlgSeen = 1, DlgSeen)
+    RichSay("普通对话框不带置顶位", DlgTop = 0, DlgTop)
+    RichSay("普通对话框返回 ok=0", r2.ok = 0, r2.ok)
+
+    ; 3) 没有残窗
+    Sleep 300
+    left := WinExist("重命名便签（置顶测试）") || WinExist("重命名便签（普通测试）")
+    RichSay("对话框关掉后没有残窗", !left, left)
+
+    /* 4) 端到端：置顶的便签调 App.RenameNote，弹出来的框也得是置顶的。
+       这一段才真正验到"置顶时重命名框不会被便签盖住"这条需求。 */
+    w := 0
+    try w := App.NewNote()
+    Loop 60 {
+        if w && w.ready
+            break
+        Sleep 100
+    }
+    RichSay("临时建了一张便签", w && w.ready ? 1 : 0)
+    if (w && w.ready) {
+        id := w.id
+        App.SetPin(id, 1)
+        DlgSeen := 0, DlgTop := -1
+        SetTimer(DialogProbeTick.Bind("重命名便签"), -120)
+        App.RenameNote(id)
+        RichSay("置顶便签的重命名框是置顶的", DlgSeen = 1 && DlgTop = 1, DlgSeen "/" DlgTop)
+        ; 取消（WM_CLOSE）不该改标题
+        stillAuto := App.Store.Get(id)
+        RichSay("取消后标题没被改动", stillAuto && stillAuto.title_locked = 0,
+            stillAuto ? stillAuto.title_locked : "?")
+        App.DeleteNote(id)
+        Sleep 200
+        RichSay("测试便签已删除", App.Store.Get(id) ? 0 : 1)
+    }
+
+    App.Log("SELFTEST DIALOG 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
         . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
 }
 

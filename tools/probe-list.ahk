@@ -21,6 +21,13 @@ class App {
     static SetFontSize(px) => 0
     static RefreshTray() => 0
     static OpenExternal(u) => 0
+    ; 列表窗口要读/写 config.ini（置顶偏好），测试里用内存版的够用了
+    static CfgStore := Map()
+    static Cfg(sec, key, def) {
+        k := sec "." key
+        return App.CfgStore.Has(k) ? App.CfgStore[k] : def
+    }
+    static SetCfg(sec, key, val) => App.CfgStore[sec "." key] := val
 }
 
 global PassN := 0, FailN := 0
@@ -125,6 +132,29 @@ Check("点击回调 onOpen", openId != 0, "id=" openId)
 ListWindow.Win.wv.ExecuteScript("document.querySelector('#list .item .ops button.del').click();1")
 Sleep 400
 Check("删除按钮回调", InStr(FileRead(App.LogPath, "UTF-8"), "hook:delete") > 0)
+
+; ---- 窗口置顶：按钮 → 宿主改窗口 → 回消息点亮按钮 -----------------------
+hwnd := ListWindow.Win.gui.Hwnd
+on0 := ListWindow.Win.wv.ExecuteScript("document.getElementById('btnPin').classList.contains('on')")
+Check("置顶按钮初始是熄的", on0 = "false", on0)
+Check("初始窗口不带 WS_EX_TOPMOST", (WinGetExStyle("ahk_id " hwnd) & 0x8) = 0
+    , WinGetExStyle("ahk_id " hwnd))
+
+ListWindow.Win.wv.ExecuteScript("document.getElementById('btnPin').click();1")
+Sleep 700
+Check("点图钉后窗口真的置顶了", (WinGetExStyle("ahk_id " hwnd) & 0x8) ? 1 : 0
+    , WinGetExStyle("ahk_id " hwnd))
+on1 := ListWindow.Win.wv.ExecuteScript("document.getElementById('btnPin').classList.contains('on')")
+Check("按钮跟着点亮", on1 = "true", on1)
+Check("置顶偏好写进了配置", App.Cfg("window", "listTopmost", 0) ? 1 : 0,
+    App.Cfg("window", "listTopmost", "?"))
+
+ListWindow.Win.wv.ExecuteScript("document.getElementById('btnPin').click();1")
+Sleep 700
+Check("再点一次取消置顶", (WinGetExStyle("ahk_id " hwnd) & 0x8) = 0
+    , WinGetExStyle("ahk_id " hwnd))
+on2 := ListWindow.Win.wv.ExecuteScript("document.getElementById('btnPin').classList.contains('on')")
+Check("按钮跟着熄掉", on2 = "false", on2)
 
 ListWindow.Close()
 Sleep 300
