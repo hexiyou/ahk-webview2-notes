@@ -14,6 +14,8 @@ class App {
     static Toast(t) => 0
     static NewNote() => 0
     static ShowList() => 0
+    static ZoomFont(step) => 0
+    static SetFontSize(px) => 0
     static RefreshTray() => 0
     static OpenExternal(u) => 0
 }

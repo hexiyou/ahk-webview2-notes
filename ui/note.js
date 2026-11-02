@@ -50,6 +50,7 @@
         case 'pin': setPinned(msg.on); break;
         case 'toggle-md': setMode(state.mode === 'md' ? 'rich' : 'md'); break;
         case 'copy-all': copyAll(); break;
+        case 'font': applyFontSize(msg.size); break;
         case 'focus': editor.focus(); break;
       }
     });
@@ -64,7 +65,7 @@
     document.body.classList.toggle('transparent', !!state.app.transparent);
     // 拖动模式：manual = 顶栏让出来自己拖（默认）；native = 还给 -webkit-app-region
     document.body.dataset.drag = state.app.drag === 'native' ? 'native' : 'manual';
-    if (state.app.fontSize) document.documentElement.style.setProperty('--fs', state.app.fontSize + 'px');
+    if (state.app.fontSize) applyFontSize(state.app.fontSize);
     applyColor(n.color);
     setPinned(n.pinned);
 
@@ -315,6 +316,31 @@
     e.preventDefault();
     send({ type: 'resize-start', id: state.id, edge: 'se' });
   });
+
+  /* ---- Ctrl + 滚轮缩放字号 ---------------------------------------------- */
+
+  /* 改的是全局字号（config.ini 的 [appearance] fontSize），宿主收到 font 消息
+     后落盘并广播给其它已打开的便签。不是"每张便签存一个字号"：用户要的是
+     "把字调大点"这个动作，和浏览器 Ctrl+滚轮 一个心智，不该逐张去调。
+     passive:false 必须显式写上 —— Chrome 默认把 wheel 监听当被动的，那样
+     preventDefault() 无效（WebView2 会同时按自己的比例缩放整个页面，双倍放大）。 */
+  const FS_MIN = 10, FS_MAX = 32, FS_DEFAULT = 15;
+
+  function applyFontSize(px) {
+    const n = Math.max(FS_MIN, Math.min(FS_MAX, Math.round(Number(px) || FS_DEFAULT)));
+    state.app.fontSize = n;
+    document.documentElement.style.setProperty('--fs', n + 'px');
+    return n;
+  }
+
+  window.addEventListener('wheel', e => {
+    if (!e.ctrlKey || !e.deltaY) return;
+    e.preventDefault();
+    const step = e.deltaY < 0 ? 1 : -1;
+    const next = applyFontSize((state.app.fontSize || FS_DEFAULT) + step);
+    hint('字号 ' + next);
+    send({ type: 'font', size: next });
+  }, { passive: false });
 
   /* ---- 快捷键 ----------------------------------------------------------- */
 

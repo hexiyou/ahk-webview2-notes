@@ -59,6 +59,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
 | 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用 |
 | Markdown | `Ctrl+M` 在所见即所得和源码之间切换，两边双向转换 |
+| 字号缩放 | 编辑区 `Ctrl+滚轮` 实时放大 / 缩小（10~32px），所有便签一起变并记住 |
 | 自动保存 | 停止输入 400ms 自动落库，关窗/收起/失焦时补一次 |
 | 位置记忆 | 关掉重开，位置、尺寸、颜色、置顶状态都还原 |
 | 列表与搜索 | `Ctrl+Alt+L` 打开总览，按关键字全文搜索（含已收起的便签） |
@@ -74,6 +75,7 @@ runtime\AutoHotkey64.exe note.ahk
 | `Ctrl+B` / `Ctrl+I` / `Ctrl+U` | 加粗 / 斜体 / 下划线 |
 | `Ctrl+S` | 立即保存 |
 | `Ctrl+M` | 切换 Markdown 源码 |
+| `Ctrl+滚轮` | 放大 / 缩小正文字号（也可用右键菜单的「字号」） |
 | `Esc` | 失焦、保存 |
 
 全局：
@@ -268,6 +270,12 @@ runtime\AutoHotkey64.exe note.ahk --selftest-menu
 # 程序级自检：Ctrl+N 链路（热键注册 + 条件判定 + 延迟建窗不卡死）
 runtime\AutoHotkey64.exe note.ahk --selftest-keys
 
+# 程序级自检：延迟入口能不能真的把列表打开（回归"点菜单没反应"）
+runtime\AutoHotkey64.exe note.ahk --selftest-list
+
+# 程序级自检：Ctrl+滚轮 字号（合成 WheelEvent，验放大/上下限/落盘）
+runtime\AutoHotkey64.exe note.ahk --selftest-font
+
 # 数据层
 runtime\AutoHotkey64.exe tools\probe-store.ahk
 
@@ -419,13 +427,30 @@ pwsh -File tools/make-icon.ps1
     `HotIf(ListHotkeyCond)` + `Hotkey("^n", ...)`，只在列表窗口是前台时生效。
     注意条件必须是**命名函数**：内联箭头传给 `HotIf` 会报 `Invalid callback function`。
 
-24. **★ `#Warn` 会把"跨文件调用的顶层函数"判成未赋值变量。** `lib\note-window.ahk` 里写
-    `(*) => NoteDeferNew()`，当这个库被 `tools\probe-menu.ahk` 单独 include 时（没有 note.ahk），
-    AHK 认为 `NoteDeferNew` 是个从没赋值的局部变量，直接**弹一个模态警告框**把自动化测试卡住。
-    两个改法一起用：把封装定义挪进库文件本身，并且用 `SetTimer(Func("NoteNew"), -10)`
-    延迟解析函数名（`Func("...")` 里是字符串，编译期不会解析）。
+24. **★ `#Warn` 会把"跨文件调用的顶层函数"判成未赋值变量，但别用 `Func("名字")` 去绕。**
+    `lib\note-window.ahk` 里写 `(*) => NoteDeferNew()`，当这个库被 `tools\probe-menu.ahk`
+    单独 include 时（没有 note.ahk），AHK 认为 `NoteDeferNew` 是个从没赋值的局部变量，
+    直接**弹一个模态警告框**把自动化测试卡住。第一版为此改用了 `SetTimer(Func("NoteNew"), -10)`
+    —— 那是 AHK **v1** 的写法。v2 里 `Func` 是内置类，`Func("NoteNew")` 会走类构造并返回一个
+    残缺对象，`SetTimer` 再调它的 `.Call()` 就抛 `Object.Call / Invalid base.`。更坑的是这个
+    异常被 `OnError` 静默记进日志就完事（不弹框），界面表现是**点托盘菜单、点便签菜单全都没反应**。
+    实测：`Func("X")` 直接抛 `Invalid base`，而裸函数名 `x := X` 的 `Type` 就是 `Func`。
+    正确写法是调 `App` 的静态方法（`SetTimer(() => App.NewNote(), -10)`）——
+    库被单独 include 时探针里也有同名 `App` 桩类，两边都能跑，还不用延迟解析函数名。
 
-25. **AHK 的 `Map.Count` 是属性、自己类的 `Count()` 是方法。** 写 `App.Store.Count`
+25. **自检脚本不要裸写 `ExitApp`。** 直接 `ExitApp 0` 会跳过 WebView2 controller 的
+    `Close()`，进程退不掉（实测连 `timeout 45s` 都等不到），而且这段时间仍占着单实例互斥锁，
+    紧接着跑下一个自检就会被"已经有一个实例在跑"顶掉，症状是测试莫名没反应。
+    统一走 `SelfTestDone()` → `App.Quit()`（关窗口 → 关列表 → 关库 → 退出）。
+
+26. **★ `Ctrl+滚轮` 要用页面自己的 `wheel` 处理器，不要指望 WebView2 的缩放。** 页面里
+    `window.addEventListener('wheel', ..., { passive:false })` —— `passive:false` 必须显式写，
+    否则 Chrome 按被动监听处理，`preventDefault()` 无效，会同时触发 WebView2 自己的整页缩放
+    （字被放大两倍）。宿主侧再把 `IsZoomControlEnabled := 0` 关掉，双保险。
+    字号是**全局**的（`config.ini` 的 `[appearance] fontSize`），不是每张便签一份：
+    改完广播给所有开着的便签，两边一起变，和浏览器 Ctrl+滚轮 一个手感。
+
+27. **AHK 的 `Map.Count` 是属性、自己类的 `Count()` 是方法。** 写 `App.Store.Count`
     （漏括号）拿到的是**函数对象**，拼进字符串时报 `Expected a String but got a Func`，
     行号还指在日志那一行，很难往这儿想。另外 `Hotkey(KeyName)` 在 2.0.31 上恒返回空串，
     查不到"这个热键注册了没有"，只能靠注册时自己打日志。

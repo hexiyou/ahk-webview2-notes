@@ -36,6 +36,10 @@ class App {
     static Queue := []
     static QueueIdx := 0
     static InstanceLock := 0
+    ; 字号范围：太小看不清，太大一张便签里放不下几个字
+    static FONT_MIN := 10
+    static FONT_MAX := 32
+    static FONT_DEFAULT := 15
 
     ; ========================================================================
     ;  启动
@@ -116,6 +120,10 @@ class App {
             SetTimer(SelfTestMenu, -2500)
         if App.HasArg("--selftest-keys")
             SetTimer(SelfTestKeys, -2500)
+        if App.HasArg("--selftest-list")
+            SetTimer(SelfTestList, -2500)
+        if App.HasArg("--selftest-font")
+            SetTimer(SelfTestFont, -2500)
 
         ; 8) 几何变化巡检：拖动/缩放结束后把位置写回库
         SetTimer(NoteGeoTick, 800)
@@ -283,6 +291,55 @@ class App {
         App.Store.SetColor(id, color)
         if NoteWindow.All.Has(id)
             NoteWindow.All[id].ApplyColor(color)
+    }
+
+    /* ---- 字号 ---------------------------------------------------------------
+       字号是全局的（config.ini 的 [appearance] fontSize），不是每张便签一份：
+       Ctrl+滚轮 的手感应该像浏览器缩放，所有便签一起变，不需要用户逐张去调。
+       入口有两个：页面里的 Ctrl+滚轮（发 font 消息过来）、便签右键菜单的「字号」，
+       都收口到 ZoomFont / SetFontSize。 */
+    static ZoomFont(step) {
+        cur := App.Ctx ? App.Ctx.appearance.fontSize : 15
+        App.SetFontSize(step = 0 ? App.FONT_DEFAULT : cur + (step > 0 ? 1 : -1))
+    }
+
+    static SetFontSize(px) {
+        px := Max(App.FONT_MIN, Min(App.FONT_MAX, Integer(px)))
+        if !App.Ctx
+            return
+        if (App.Ctx.appearance.fontSize = px)
+            return
+        App.Ctx.appearance.fontSize := px
+        ; 广播给所有开着的便签：页面把 --fs 变量一改，正文和源码视图一起变
+        for id, w in NoteWindow.All
+            w.Send('{"type":"font","size":' px '}')
+        /* 合并写盘：按住滚轮连续滚会一秒触发几十次，每次 IniWrite 都要重写整个
+           文件。延后 400ms 只写最后一次，中间的内存值始终是最新的。 */
+        SetTimer(NoteFontSave, -400)
+    }
+
+    static SaveFontSize() {
+        if App.Ctx
+            App.SetCfg("appearance", "fontSize", App.Ctx.appearance.fontSize)
+    }
+
+    /* 在便签页面里跑一段 JS 并把结果当数字取回（只给自检用）。
+       ExecuteScriptAsync 的返回值是 JSON 编码过的文本（"15" 会变成 "\"15\""，
+       取不到值时是 "NaN"/"undefined"/"{}"），所以这里用正则抠第一个数字，
+       抠不到就返回 -1，让断言自然失败。不要写 r+0：字符串一旦不是纯数字，
+       AHK v2 会抛 "Expected a Number but got a String"，把整个自检线程带走。 */
+    static EvalNum(w, js) {
+        r := ""
+        try r := w.wv.ExecuteScriptAsync(js).await()
+        catch as e {
+            App.Log("ExecuteScript 失败：" CleanComError(e.Message))
+            return -1
+        }
+        if !RegExMatch(r, "-?\d+(?:\.\d+)?", &m) {
+            App.Log("ExecuteScript 取不到数字，原始返回：" r)
+            return -1
+        }
+        return Round(m[0] + 0)
     }
 
     static RefreshList() {
@@ -500,7 +557,7 @@ class App {
         text .= "; 1 = 半透明卡片，能透出桌面；0 = 不透明实色`r`n"
         text .= "; 如果透明模式下窗口是黑底或者空白，把它改成 0`r`n"
         text .= "transparent=1`r`n"
-        text .= "; 正文字号（像素）`r`n"
+        text .= "; 正文字号（像素，10~32）。编辑区里 Ctrl+滚轮 也能调，会写回这里`r`n"
         text .= "fontSize=15`r`n"
         text .= "; 拖动方式：manual = 顶栏按下后交给系统移动循环（默认，实机可靠）`r`n"
         text .= "; native = 用 -webkit-app-region 让 WebView2 自己处理；实测在透明`r`n"
@@ -550,6 +607,14 @@ class App {
     }
 }
 
+/* 自检收尾：一律走 App.Quit()，不要裸写 ExitApp。
+   裸退出会跳过 WebView2 controller 的 Close，进程会在后台滞留几十秒
+   （实测 timeout 45s 都等不到它退），同时还占着单实例互斥锁 —— 紧跟着跑
+   下一个自检就会被"已经有一个实例在跑"顶掉，症状是测试莫名没反应。 */
+SelfTestDone() {
+    App.Quit()
+}
+
 /* 自检：收起全部 -> 全部显示，确认窗口真的回到屏幕上。
    只在带 --selftest-showall 启动时跑一次，用于回归"全部显示没反应"这个 bug。 */
 SelfTestShowAll() {
@@ -576,7 +641,7 @@ SelfTestShowAll() {
         hiddenLeft += n.hidden ? 1 : 0
     App.Log("SELFTEST 全部显示后：可见窗口 " shown " 个，库里仍未显示的 " hiddenLeft " 张")
     App.Log("SELFTEST 结论：" (shown = App.Store.Count() && hiddenLeft = 0 ? "通过" : "未通过"))
-    ExitApp 0
+    SelfTestDone()
 }
 
 /* 自检：把第一张便签的菜单弹出来（会阻塞到菜单关闭）。
@@ -589,7 +654,7 @@ SelfTestMenu() {
         App.Log("SELFTEST 菜单已关闭，没有抛异常")
         break
     }
-    ExitApp 0
+    SelfTestDone()
 }
 
 /* 自检：列表窗口的 Ctrl+N 链路。
@@ -605,12 +670,89 @@ SelfTestKeys() {
     App.ShowList()
     Sleep 1500
     App.Log("SELFTEST 列表打开后 IsActive=" ListWindow.IsActive())
+    maxId := 0
+    for n in App.Store.All()
+        maxId := Max(maxId, n.id)
     before := App.Store.Count()
     NoteDeferNew()
     Sleep 2500
     App.Log("SELFTEST 调 NoteDeferNew 后：窗口 " NoteWindow.All.Count . " 个，库里 " App.Store.Count() . " 张")
-    App.Log("SELFTEST 结论：" (App.Store.Count() = before + 1 && NoteWindow.All.Count >= 1 ? "通过" : "未通过"))
-    ExitApp 0
+    ok := (App.Store.Count() = before + 1 && NoteWindow.All.Count >= 1)
+    App.Log("SELFTEST 结论：" (ok ? "通过" : "未通过"))
+    ; 自检自己造出来的那张要删掉，别在用户库里留空白便签
+    for n in App.Store.All()
+        if (n.id > maxId)
+            App.DeleteNote(n.id)
+    SelfTestDone()
+}
+
+/* 自检：列表窗口的"延迟入口"。
+   上一版把 NoteDeferList 写成了 SetTimer(Func("NoteShowList"), -10)，而 AHK v2
+   里 Func 是内置类，Func("名字") 返回残缺对象，SetTimer 调它的 .Call() 抛
+   "Invalid base."；异常又被 NoteOnError 静默吞掉，界面上就是"点托盘菜单、
+   点便签菜单，全都没反应"。这条自检专门钉住这个入口，顺便验字号链路。 */
+SelfTestList() {
+    App.Log("SELFTEST 延迟入口调用前：列表开着=" ListWindow.IsOpen())
+    NoteDeferList()
+    Sleep 2000
+    open := ListWindow.IsOpen()
+    App.Log("SELFTEST 调 NoteDeferList 后：列表开着=" open)
+
+    before := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
+    App.SetFontSize(before + 1)
+    Sleep 700
+    got := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
+    App.Log("SELFTEST 字号写入：库里 " got "（期望 " (before + 1) "）")
+    App.SetFontSize(before)                 ; 别把用户配置改坏
+    Sleep 700
+    back := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
+    App.Log("SELFTEST 字号已恢复为 " back)
+    App.Log("SELFTEST 结论：" (open && got = before + 1 && back = before ? "通过" : "未通过"))
+    SelfTestDone()
+}
+
+/* 自检：Ctrl+滚轮 字号链路。
+   这台机器上注入键盘/滚轮会直接把脚本卡死（已确认），所以改用
+   ExecuteScriptAsync 在页面里合成 ctrlKey:true 的 WheelEvent —— 走的是和真滚轮
+   完全相同的 window.addEventListener('wheel') 那条路，只是省掉了物理输入。
+   验四件事：能放大、下限 10、上限 32、宿主把最终值写进了 config.ini。 */
+SelfTestFont() {
+    w := 0
+    for id, x in NoteWindow.All {
+        w := x
+        break
+    }
+    if !w {
+        App.Log("SELFTEST 字号：没有便签窗口，跳过")
+        SelfTestDone()
+        return
+    }
+    Loop 30 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    before := App.EvalNum(w, "String(parseFloat(getComputedStyle(document.body).fontSize))")
+    ; dispatchEvent 的返回值是"事件有没有被取消"，取回来会让日志变吵，末尾补个 1
+    js := "window.dispatchEvent(new WheelEvent('wheel',{ctrlKey:true,deltaY:120,bubbles:true,cancelable:true}));1;"
+    jsUp := "window.dispatchEvent(new WheelEvent('wheel',{ctrlKey:true,deltaY:-120,bubbles:true,cancelable:true}));1;"
+    App.EvalNum(w, jsUp)
+    App.EvalNum(w, jsUp)
+    Sleep 500
+    up := App.EvalNum(w, "String(parseFloat(getComputedStyle(document.body).fontSize))")
+    App.EvalNum(w, "for(let i=0;i<40;i++){" js "}")
+    Sleep 700
+    low := App.EvalNum(w, "String(parseFloat(getComputedStyle(document.body).fontSize))")
+    App.EvalNum(w, "for(let i=0;i<40;i++){" jsUp "}")
+    Sleep 900
+    high := App.EvalNum(w, "String(parseFloat(getComputedStyle(document.body).fontSize))")
+    cfg := App.Cfg("appearance", "fontSize", 0)
+    App.Log("SELFTEST 字号：" before " → 放大两格 " up " → 缩到底 " low " → 放到底 " high "，config 里是 " cfg)
+    ok := (up = before + 2) && (low = App.FONT_MIN) && (high = App.FONT_MAX) && (cfg = App.FONT_MAX)
+    App.Log("SELFTEST 结论：" (ok ? "通过" : "未通过"))
+    App.SetFontSize(App.FONT_DEFAULT)       ; 别把用户配置留在 32
+    Sleep 600
+    SelfTestDone()
 }
 
 ; ---- 顶层包装：SetTimer / OnError 传类静态方法引用会踩坑，统一走这里 ----------
@@ -622,6 +764,7 @@ NoteShowList() => App.ShowList()
 NoteShowAllSoon() {
     SetTimer(NoteShowAll, -10)
 }
+NoteFontSave() => App.SaveFontSize()
 NoteToggle() => App.ToggleAll()
 /* Ctrl+N 的条件：只有列表窗口是前台时才生效。
    必须用命名函数：实测内联箭头传给 HotIf 会报 "Invalid callback function"。 */

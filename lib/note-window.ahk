@@ -191,6 +191,9 @@ class NoteWindow {
                     ; 菜单和确认框都会阻塞线程，所以从消息回调里退出来再弹：
                     ; COM 回调用户不能长时间占着，否则 WebView2 侧会等着卡住
                     SetTimer(ObjBindMethod(this, "ShowMenu"), -10)
+                case "font":
+                    ; Ctrl+滚轮：页面先自己应用了字号，这里只负责落盘 + 通知其它窗口
+                    App.SetFontSize(JsonNum(raw, "size"))
                 case "delete":
                     SetTimer(ObjBindMethod(this, "ConfirmDelete"), -10)
                 case "open-external":
@@ -415,6 +418,15 @@ class NoteWindow {
             , NoteWindow.MB(ObjBindMethod(this, "SendType", "toggle-md")))
         m.Add("复制全文", NoteWindow.MB(ObjBindMethod(this, "CopyAll")))
         m.Add()
+        /* 字号也有菜单入口：万一没有滚轮（或触控板不好按 Ctrl+滚轮），
+           还能调回来。Ctrl+滚轮 和这里走的是同一套 SetFontSize。 */
+        fm := Menu()
+        fm.Add("放大`tCtrl+滚轮上", (*) => App.ZoomFont(1))
+        fm.Add("缩小`tCtrl+滚轮下", (*) => App.ZoomFont(-1))
+        fm.Add()
+        fm.Add("恢复默认", (*) => App.ZoomFont(0))
+        m.Add("字号", fm)
+        m.Add()
         m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
         m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
         m.Show()
@@ -494,13 +506,17 @@ class NoteWindow {
 }
 
 ; ---- 延迟建窗（COM 回调里不能 await，必须换到 SetTimer 的独立线程） -----------
-; 这里刻意用 Func("...") 延迟解析函数名：本文件会被 tools\probe-menu.ahk 之类
-; 单独 include，那时 note.ahk 里的 NoteNew / NoteShowList 并不存在，裸写函数名
-; 会被 #Warn 判成"未赋值的局部变量"，直接弹一个模态警告框把测试卡死。
+/* ★ 绝对不要用 Func("名字")。那是 AHK v1 的写法，v2 里 Func 是内置类，
+   Func("NoteNew") 会走类构造并返回一个残缺对象，SetTimer 再调它的 .Call()
+   就抛 "Object.Call / Invalid base."。更阴的是 NoteOnError 把它记进日志就完事
+   （不弹框），界面表现是"点菜单毫无反应"。实测过：Func() 直接抛 Invalid base，
+   而裸函数名的 Type 就是 Func。
+   这里调的是 App 的静态方法：probe 脚本单独 include 本文件时也会有一个同名的
+   App 桩类，所以两边都能跑。 */
 NoteDeferNew() {
-    SetTimer(Func("NoteNew"), -10)
+    SetTimer(() => App.NewNote(), -10)
 }
 
 NoteDeferList() {
-    SetTimer(Func("NoteShowList"), -10)
+    SetTimer(() => App.ShowList(), -10)
 }
