@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设置</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+
+<body>
+  <header class="head" id="head">
+    <div class="title">设置</div>
+    <button id="btnClose" class="icon" title="关闭（Esc）" aria-label="关闭">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </svg>
+    </button>
+  </header>
+
+  <main class="body" id="body">
+
+    <section>
+      <h2>启动</h2>
+      <label class="row">
+        <input type="checkbox" id="showAllOnStart">
+        <span class="line">
+          <b>启动时显示所有便签</b>
+          <em>关掉只恢复上次没收起的</em>
+        </span>
+      </label>
+      <label class="row">
+        <input type="checkbox" id="openListOnStart">
+        <span class="line">
+          <b>启动时打开便签列表</b>
+          <em>开机自启时不想弹窗就关掉</em>
+        </span>
+      </label>
+    </section>
+
+    <section>
+      <h2>外观</h2>
+      <label class="row">
+        <input type="checkbox" id="transparent">
+        <span class="line">
+          <b>半透明卡片</b>
+          <em>改完会重建窗口，稍等一秒</em>
+        </span>
+      </label>
+      <div class="row">
+        <span class="grow line">
+          <b>正文字号</b>
+          <em>便签里 Ctrl+滚轮 也能调</em>
+        </span>
+        <input type="number" id="fontSize" min="10" max="32" step="1" class="num">
+        <span class="unit">px</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>快捷键</h2>
+      <p class="note">点进输入框直接按组合键即可录制；清空 = 不注册。</p>
+
+      <div class="row">
+        <span class="grow"><b>新建便签</b></span>
+        <input type="text" id="hkNew" class="hk" placeholder="未设置" readonly>
+        <button class="clear" data-for="hkNew" title="清空">×</button>
+      </div>
+      <div class="row">
+        <span class="grow"><b>打开便签列表</b></span>
+        <input type="text" id="hkList" class="hk" placeholder="未设置" readonly>
+        <button class="clear" data-for="hkList" title="清空">×</button>
+      </div>
+      <div class="row">
+        <span class="grow"><b>显示 / 收起全部</b></span>
+        <input type="text" id="hkToggle" class="hk" placeholder="未设置" readonly>
+        <button class="clear" data-for="hkToggle" title="清空">×</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>其他</h2>
+      <div class="row">
+        <span class="grow">
+          <b>数据目录</b>
+          <i id="dataDir">—</i>
+        </span>
+        <button class="plain" id="btnDataDir">打开</button>
+      </div>
+      <div class="row">
+        <span class="grow"><b>运行日志</b></span>
+        <button class="plain" id="btnLog">打开</button>
+      </div>
+    </section>
+
+    <p class="about" id="about">—</p>
+  </main>
+
+  <footer class="foot">
+    <button class="plain" id="btnReset">恢复默认</button>
+    <span class="grow"></span>
+    <span class="status" id="status"></span>
+    <button class="plain" id="btnCancel">取消</button>
+    <button class="primary" id="btnSave">保存</button>
+  </footer>
+
+  <script src="settings.js"></script>
+</body>
+
+</html>

@@ -85,7 +85,14 @@ class NoteWindow {
             this.wv.Settings.AreDevToolsEnabled := ctx.devtools ? 1 : 0
             this.wv.Settings.IsStatusBarEnabled := 0
             this.wv.Settings.IsZoomControlEnabled := 0
-            this.wv.Settings.AreBrowserAcceleratorKeysEnabled := 0
+            /* ★ 这里必须开着浏览器快捷键（默认值 1）。
+               曾经为了禁掉 F5/Ctrl+P 把它设成 0，结果连 Ctrl+V 一起废了：
+               Chromium 的"粘贴"是浏览器侧的编辑命令，禁掉快捷键之后 renderer
+               根本不产生 paste 事件，页面里挂再多监听也收不到 —— 表现就是
+               "右键插入图片正常，Ctrl+V 完全没反应"（用户实测）。
+               现在改成保留快捷键，再在页面的 keydown 里 preventDefault 掉
+               F5 / Ctrl+R / Ctrl+P / Ctrl+F / Ctrl+N / Ctrl+O / Ctrl+J。
+               Ctrl+C/V/X/A/Z 一个都不拦。 */
         }
         try {
             this.wvc.ShouldDetectMonitorScaleChanges := 1
@@ -431,10 +438,28 @@ class NoteWindow {
         fm.Add()
         fm.Add("恢复默认", (*) => App.ZoomFont(0))
         m.Add("字号", fm)
+
+        /* 导出：四种格式各一项。用子菜单而不是弹个"选格式"的对话框 ——
+           导出是低频操作，多一层菜单比多一个对话框省事。 */
+        em := Menu()
+        em.Add("纯文本  (*.txt)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "txt")))
+        em.Add("Markdown (*.md)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "md")))
+        em.Add("网页  (*.html)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "html")))
+        em.Add("RTF 文档 (*.rtf)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "rtf")))
+        m.Add("导出", em)
+
         m.Add()
         m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
         m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
         m.Show()
+    }
+
+    /* 导出统一走 App.ExportNote：它会重新从库里取一次（窗口手里的 this.note
+       可能是几分钟前的老快照），也避免这个文件直接依赖 export.ahk ——
+       tools 下的探针只 include 本文件，凭空出现的 `Export.` 会被 #Warn 判成
+       "未赋值的变量"，然后弹个模态框把自动化测试卡死。 */
+    ExportAs(fmt) {
+        App.ExportNote(this.id, fmt)
     }
 
     /* ---- 插入图片 -----------------------------------------------------------

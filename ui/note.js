@@ -188,7 +188,10 @@
     send({ type: 'pin', id: state.id, on: !!state.pinned });
   });
   $('btnMenu').addEventListener('click', () => send({ type: 'menu', id: state.id }));
-  $('btnClose').addEventListener('click', () => send({ type: 'close', id: state.id }));
+  /* 右上角 X 是"收起"，不是删除。原来这个按钮直接 Destroy + Delete，
+     和"关闭一个窗口"的直觉严重不符，误点一次便签就没了（虽然还能从列表里
+     找回来，但正文已经删除）。删除只留右键菜单和列表窗口两个入口。 */
+  $('btnClose').addEventListener('click', () => send({ type: 'hide', id: state.id }));
 
   /* 右键菜单用系统原生菜单（由宿主弹），不自己画：便签窗口最小可以缩到
      180×140，页面内的菜单根本放不下九项，原生菜单才能超出窗口边界。
@@ -499,10 +502,46 @@
     addImage(file);
   }
 
-  editor.addEventListener('drop', onDrop);
-  editor.addEventListener('paste', onPaste);
-  source.addEventListener('drop', onDrop);
-  source.addEventListener('paste', onPaste);
+  /* 挂 document 而不是 editor：
+     Ctrl+V 的 paste 事件投给"当前焦点元素"，用户在便签里点一下标题栏、
+     或者刚关掉原生右键菜单，焦点就不在编辑区了，挂在 editor 上的监听根本
+     收不到 —— 表现正是"右键插入图片能用，Ctrl+V 毫无反应"。
+     capture 阶段挂可以保证在页面的其它处理之前拿到事件。 */
+  document.addEventListener('drop', onDrop, true);
+  document.addEventListener('paste', onPaste, true);
+
+  /* ---- 点图片看原图 -----------------------------------------------------
+     正文里的图最大 180px 高（见 note.css），看不清楚；点一下用遮罩铺满窗口
+     显示原图。遮罩是 fixed 定位的独立元素，不参与正文排版，所以开关的时候
+     文字不会跳动，也不会动到光标。 */
+  const lightbox = $('lightbox');
+  const lightboxImg = $('lightboxImg');
+
+  function openLightbox(src, alt) {
+    if (!src) return;
+    lightboxImg.src = src;
+    lightboxImg.alt = alt || '';
+    lightbox.hidden = false;
+  }
+
+  function closeLightbox() {
+    if (lightbox.hidden) return false;
+    lightbox.hidden = true;
+    lightboxImg.removeAttribute('src');
+    return true;
+  }
+
+  lightbox.addEventListener('click', e => {
+    e.preventDefault();
+    closeLightbox();
+  });
+
+  editor.addEventListener('click', e => {
+    const img = e.target;
+    if (!img || img.tagName !== 'IMG' || img.classList.contains('pending')) return;
+    e.preventDefault();
+    openLightbox(img.getAttribute('src'), img.alt);
+  });
 
   /* ---- 勾选框 ----------------------------------------------------------- */
 
@@ -553,9 +592,24 @@
 
   document.addEventListener('keydown', e => {
     const mod = e.ctrlKey || e.metaKey;
+
+    /* 宿主侧为了让 Ctrl+V / Ctrl+C 正常工作，开启了 WebView2 的浏览器快捷键
+       （AreBrowserAcceleratorKeysEnabled）。副作用是 F5 / Ctrl+R 会刷新页面、
+       Ctrl+P 会弹打印、Ctrl+F 会弹出查找条 —— 在一个便签窗口里全是误触。
+       这些键在 Chromium 里页面能先拿到 keydown，preventDefault 掉即可。
+       Ctrl+C/V/X/A/Z 千万别拦，那些正是我们要它工作的。 */
+    if (e.key === 'F5' || (mod && ['r', 'p', 'f', 'n', 'o', 'j'].includes(e.key.toLowerCase()))) {
+      e.preventDefault();
+      return;
+    }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveNow(); return; }
     if (mod && e.key.toLowerCase() === 'm') { e.preventDefault(); setMode(state.mode === 'md' ? 'rich' : 'md'); return; }
-    if (e.key === 'Escape') { saveNow(); window.getSelection().removeAllRanges(); return; }
+    if (e.key === 'Escape') {
+      if (closeLightbox()) return;      // 看图时 Esc 只关遮罩，别顺手把选区也清了
+      saveNow();
+      window.getSelection().removeAllRanges();
+      return;
+    }
 
     // Markdown 源码里 Tab 要能缩进，而不是把焦点跳走
     if (state.mode === 'md' && e.key === 'Tab') {

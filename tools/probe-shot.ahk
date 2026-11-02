@@ -18,6 +18,7 @@ class App {
     static ShowList() => 0
     static ZoomFont(step) => 0
     static RenameNote(id) => 0
+    static ExportNote(id, fmt) => 0
     static SaveImage(raw, id) => 0
     static SetFontSize(px) => 0
     static RefreshTray() => 0

@@ -34,7 +34,7 @@
             <circle cx="18" cy="12" r="1.6" fill="currentColor" />
           </svg>
         </button>
-        <button class="tool close" id="btnClose" title="删除这张便签" aria-label="删除">
+        <button class="tool close" id="btnClose" title="收起这张便签（删除请用右键菜单）" aria-label="收起">
           <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
             <path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
           </svg>
@@ -54,6 +54,12 @@
     </footer>
 
     <div class="grip" id="grip" title="拖动调整大小"></div>
+  </div>
+
+  <!-- 点图片看原图用的遮罩。用固定定位盖住整个页面，不参与排版，
+       所以不会影响编辑区的光标与滚动。 -->
+  <div class="lightbox" id="lightbox" hidden>
+    <img id="lightboxImg" alt="">
   </div>
 
   <div class="floatbar" id="floatbar" hidden>

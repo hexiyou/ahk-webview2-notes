@@ -59,6 +59,9 @@ runtime\AutoHotkey64.exe note.ahk
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
 | 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用、链接、代码块、分割线 |
 | 插入图片 | 拖文件进来 / `Ctrl+V` 粘截图 / 右键「插入图片…」；图片存 `data\images`，正文只留链接 |
+| 看图 | 正文里的图按 180px 高缩略显示，点一下铺满窗口看原图（再点或 `Esc` 关） |
+| 导出 | 右键「导出」→ TXT / Markdown / HTML / RTF；HTML 会把图片内嵌成 data URI，单文件即可分享 |
+| 设置面板 | 托盘「设置…」或列表空白右键：启动行为、外观、三个全局热键都能改 |
 | 自定义标题 | 列表和便签的右键菜单都有「重命名…」；不手动改就按正文第一行自动取 |
 | Markdown | `Ctrl+M` 在所见即所得和源码之间切换，两边双向转换 |
 | 字号缩放 | 编辑区 `Ctrl+滚轮` 实时放大 / 缩小（10~32px），所有便签一起变并记住 |
@@ -104,7 +107,7 @@ runtime\AutoHotkey64.exe note.ahk
 - `M↓` 切换 Markdown 源码
 - 📌 置顶（置顶后窗口始终在最前）
 - `⋯` 更多菜单，和右键菜单是同一个
-- `×` 删除这张便签（不可撤销）
+- `×` **收起**这张便签（不是删除；删除走右键菜单或列表窗口，避免误触）
 
 右下角有缩放手柄，拖它调整大小。
 
@@ -121,6 +124,9 @@ runtime\AutoHotkey64.exe note.ahk
 ────────────
 切换 Markdown 源码（源码模式下变成"切换到富文本编辑"）
 复制全文
+插入图片…
+字号  ›        放大 / 缩小 / 恢复默认
+导出  ›        TXT / Markdown / HTML / RTF
 ────────────
 收起这张
 删除这张…      带二次确认
@@ -128,8 +134,8 @@ runtime\AutoHotkey64.exe note.ahk
 
 **列表窗口**（右上角是「新建 / ⋯ / 关闭」，Esc 也能关）：
 
-- 在某一行的任意位置右键 → `打开 / 置顶·取消置顶 / 颜色› / 收起这张 / 删除…`
-- 在空白处或标题栏右键（也可以点右上角 `⋯`）→ `新建便签 / 刷新列表 / 全部显示 / 全部收起 / 打开数据目录`
+- 在某一行的任意位置右键 → `打开 / 重命名… / 置顶·取消置顶 / 颜色› / 导出› / 收起这张 / 删除…`
+- 在空白处或标题栏右键（也可以点右上角 `⋯`）→ `新建便签 / 刷新列表 / 全部显示 / 全部收起 / 打开数据目录 / 设置…`
 
 菜单是系统原生的（`Menu.Show`），不是页面自己画的：便签窗口最小能缩到 180×140，
 页面内的菜单根本放不下九项，只有原生菜单能超出窗口边界。代价是菜单打开期间
@@ -157,11 +163,29 @@ new=^!n              ; 留空表示不注册
 list=^!l
 toggle=^!h
 
+[app]
+showAllOnStart=0     ; 1=启动时把所有便签都显示出来
+openListOnStart=0    ; 1=启动时打开便签列表
+
 [debug]
 devtools=0           ; 1=允许 F12 打开开发者工具
 ```
 
-托盘菜单里也有「透明外观」开关，会直接改 `transparent` 并重建所有窗口。
+### 设置面板
+
+托盘菜单 →「设置…」，或者列表窗口空白处右键 →「设置…」。能改的东西：
+
+| 分组 | 项 |
+|---|---|
+| 启动 | 启动时显示所有便签 / 启动时打开列表 |
+| 外观 | 半透明开关、正文字号（10~32） |
+| 快捷键 | 新建便签 / 打开列表 / 显示收起全部 —— 点进输入框**直接按组合键**即可录制，× 清空表示不注册 |
+| 其他 | 打开数据目录、打开日志 |
+
+保存后字号和热键**立即生效**（热键会先校验：写法非法或被别的程序占了会当场报错，
+且原来的热键不会被弄丢）；透明开关会重建所有窗口。删掉 `config.ini` 再启动等于恢复出厂。
+
+托盘菜单里也有「透明外观」开关，和设置面板里的是同一个值。
 
 ---
 
@@ -281,6 +305,18 @@ runtime\AutoHotkey64.exe note.ahk --selftest-font
 
 # 程序级自检：富文本工具条 / Markdown 往返 / 图片插入（含源码模式）
 runtime\AutoHotkey64.exe note.ahk --selftest-rich
+
+# 程序级自检：粘贴链路 / 图片限高与看大图 / 右上角 X 只收起不删除
+runtime\AutoHotkey64.exe note.ahk --selftest-note
+
+# 程序级自检：四种导出格式（TXT / MD / HTML / RTF）
+runtime\AutoHotkey64.exe note.ahk --selftest-export
+
+# 程序级自检：设置面板（开窗 + 读值 + 保存生效 + 非法热键拦截）
+runtime\AutoHotkey64.exe note.ahk --selftest-settings
+
+# 给 README 生成设置面板截图（写到 assets\shot-settings.png）
+runtime\AutoHotkey64.exe note.ahk --shot-settings
 
 # 数据层
 runtime\AutoHotkey64.exe tools\probe-store.ahk
@@ -480,7 +516,46 @@ pwsh -File tools/make-icon.ps1
     `UPDATE notes SET title=CASE WHEN title_locked=1 THEN title ELSE ? END`，一条 SQL
     搞定"没锁就跟着第一行变、锁了就绝不覆盖"。用户清空输入框 = 解锁 + 按第一行重算。
 
-31. **AHK 的 `Map.Count` 是属性、自己类的 `Count()` 是方法。** 写 `App.Store.Count`
+31. **★★ `AreBrowserAcceleratorKeysEnabled := 0` 会把 `Ctrl+V` 一起废掉。** 当初为了让
+    `Ctrl+N` 不被 WebView2 当"新建窗口"吃掉，把这个设成 0，结果用户报"右键插入图片
+    正常、`Ctrl+V` 毫无反应"。原因是 Chromium 的粘贴是**浏览器侧**的编辑命令，快捷键
+    一关，renderer 根本不产生 `paste` 事件，页面里挂再多监听也收不到。
+    正确做法：便签窗口保持默认（开启），改在页面 `keydown` 里 `preventDefault` 掉
+    `F5` / `Ctrl+R` / `Ctrl+P` / `Ctrl+F` / `Ctrl+N` / `Ctrl+O` / `Ctrl+J`。
+    列表窗口那边只关 Ctrl+N，仍然用 0（那里不需要粘贴）。
+    **另**：`paste` 监听要挂在 `document`（capture 阶段）而不是 `#editor` 上 ——
+    `paste` 投给"当前焦点元素"，用户点过标题栏或刚关掉原生右键菜单时焦点根本不在
+    编辑区，挂 editor 上的监听永远不响。这两个坑叠在一起，症状就是"偶尔能粘、多数
+    时候没反应"。
+
+32. **图片默认缩略、点击看原图。** `.editor img { max-height:180px; object-fit:contain }`：
+    不封顶的话一张 1080p 截图就能把便签撑满，一个字都写不了。看大图用独立的
+    `position:fixed` 遮罩，**不要**用把 `img` 本身放大的做法 —— 遮罩不参与文档流，
+    开关的时候正文不跳动、光标不丢。`Esc` 只关遮罩（先判断，别顺手把选区也清了）。
+
+33. **窗口右上角的 `×` 不该是"删除"。** 原来它直接 `Destroy` + `Delete`，误点一次
+    便签就没了。现在 `×` = 收起（`hidden=1`），删除只留右键菜单和列表两个入口。
+    危险动作永远不要放在"窗户把手"上。语义变了记得同步 `title` / `aria-label`，
+    否则鼠标悬停时提示还在骗人。
+
+34. **RTF 导出：中文必须写成 `\uNNNN?`，而且 `RegExReplace` 的第三个参数不接受函数。**
+    `\uNNNN` 里的 NNNN 是 16 位**有符号**数（U+9898 → -26472），转义函数里要
+    `c > 32767 ? c - 65536 : c`。顺序也讲究：先把整行做 RTF 转义，再套 `{\b ...}`
+    这类命令 —— 反过来的话自己插入的命令会被二次转义。另外替换进去的文本（比如
+    `[图片]`）也要再过一遍转义，否则裸中文就混进 RTF 了。
+    AHK 2.0 的 `RegExReplace(hay, needle, replacement)` 里 replacement 只能是字符串，
+    传函数对象会报 `requires a String, but received a Func` —— 要回调只能自己扫
+    `MatchCollection` 再拼（HTML 内嵌图片就是这么做的）。
+
+35. **设置面板的两个坑。** ①"试注册"热键有副作用：`Hotkey(k, fn, "On")` 成功后就真的
+    占住了，`Off` 又注销掉，所以**校验失败时要把原来的热键整体重绑回去**，否则用户
+    改一个非法快捷键，原来的那个也没了。②打开设置要 `await CreateControllerAsync`，
+    **绝不能在菜单回调里直接调** —— 这就是"点完菜单什么都没反应"那个老 bug 的复现路径，
+    统一走 `SetTimer(..., -10)`。
+    ③字号写盘是 400ms 合并的，自检里改完字号如果立刻 `ExitApp`，定时器被掐掉，
+    配置就停在测试值上（踩过：用户配置文件被测试改成了 18）。
+
+36. **AHK 的 `Map.Count` 是属性、自己类的 `Count()` 是方法。** 写 `App.Store.Count`
     （漏括号）拿到的是**函数对象**，拼进字符串时报 `Expected a String but got a Func`，
     行号还指在日志那一行，很难往这儿想。另外 `Hotkey(KeyName)` 在 2.0.31 上恒返回空串，
     查不到"这个热键注册了没有"，只能靠注册时自己打日志。

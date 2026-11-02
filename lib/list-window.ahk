@@ -236,6 +236,15 @@ class ListWindow {
                     sub.Check(NoteWindow.ColorLabel(cname))
             }
             m.Add("颜色", sub)
+
+            ; 导出：和便签右键菜单里的那一套完全一样，只是入口不同
+            em := Menu()
+            em.Add("纯文本  (*.txt)", ListWindow.Cb(ListMenuExport(id, "txt")))
+            em.Add("Markdown (*.md)", ListWindow.Cb(ListMenuExport(id, "md")))
+            em.Add("网页  (*.html)", ListWindow.Cb(ListMenuExport(id, "html")))
+            em.Add("RTF 文档 (*.rtf)", ListWindow.Cb(ListMenuExport(id, "rtf")))
+            m.Add("导出", em)
+
             m.Add()
             m.Add("收起这张", ListWindow.Cb(ListMenuHide(id)))
             m.Add("删除…", ListWindow.Cb(ListMenuDelete(id)))
@@ -306,6 +315,10 @@ ListTick(raw, type) {
 
 ListMenuOpen(id) {
     return () => ListWindow.Call("onOpen", id)
+}
+
+ListMenuExport(id, fmt) {
+    return () => ListWindow.Call("onExport", id, fmt)
 }
 
 ListMenuRename(id) {

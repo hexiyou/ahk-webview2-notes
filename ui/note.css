@@ -197,11 +197,41 @@ body[data-drag="native"] .bar { -webkit-app-region: drag; }
      后面接着写（block 之后没有文本节点时，contenteditable 的光标很难落）。 */
   display: inline-block;
   max-width: 100%;
+  /* 高度也封顶，否则一张 1080p 截图就能把整张便签撑满，一个字都写不了。
+     180px 大约是 12 行正文的高度：够看清是张什么图，又不至于喧宾夺主。
+     object-fit: contain 保证等比缩，不会把图压扁。 */
+  max-height: 180px;
+  object-fit: contain;
   border-radius: 6px;
   vertical-align: bottom;
   margin: .15em 0;
+  cursor: zoom-in;
 }
 /* 上传中的占位：等宿主把文件落盘回 URL 再换上真图 */
+/* 点图片看原图。fixed 定位盖住整个窗口，不参与文档流，
+   所以打开/关闭都不会让正文跳动一下。 */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, .78);
+  cursor: zoom-out;
+}
+
+.lightbox[hidden] { display: none; }
+
+.lightbox img {
+  max-width: 96vw;
+  max-height: 96vh;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
+  cursor: zoom-out;
+}
+
 .editor img.pending {
   min-width: 120px;
   min-height: 76px;

@@ -21,10 +21,12 @@
 #Include lib\json.ahk
 #Include lib\sqlite.ahk
 #Include lib\store.ahk
+#Include lib\export.ahk
 #Include lib\win.ahk
 #Include lib\WebView2\WebView2.ahk
 #Include lib\note-window.ahk
 #Include lib\list-window.ahk
+#Include lib\settings-window.ahk
 
 class App {
     static Name := "QuickNote"
@@ -36,6 +38,7 @@ class App {
     static Queue := []
     static QueueIdx := 0
     static InstanceLock := 0
+    static Bound := 0          ; Map: 热键名 -> 当前真正注册成功的键串
     ; 字号范围：太小看不清，太大一张便签里放不下几个字
     static FONT_MIN := 10
     static FONT_MAX := 32
@@ -111,6 +114,13 @@ class App {
         App.Boot()
         App.Log("Boot 返回，窗口数=" NoteWindow.All.Count)
 
+        /* 启动行为（设置面板里可改）。等 Boot 把窗口建完再动作，
+           否则会和 BootTick 抢着建窗口。 */
+        if App.Cfg("app", "showAllOnStart", 0)
+            SetTimer(NoteShowAllSoon, -2200)
+        if App.Cfg("app", "openListOnStart", 0)
+            SetTimer(NoteDeferList, -2600)
+
         ; 命令行 --list：启动后直接把列表面板打开（做快捷方式时很有用）
         if App.HasArg("--list")
             App.ShowList()
@@ -127,6 +137,14 @@ class App {
             SetTimer(SelfTestFont, -2500)
         if App.HasArg("--selftest-rich")
             SetTimer(SelfTestRich, -2500)
+        if App.HasArg("--selftest-note")
+            SetTimer(SelfTestNote, -2500)
+        if App.HasArg("--selftest-export")
+            SetTimer(SelfTestExport, -2500)
+        if App.HasArg("--selftest-settings")
+            SetTimer(SelfTestSettings, -2500)
+        if App.HasArg("--shot-settings")
+            SetTimer(SelfTestShotSettings, -2500)
 
         ; 8) 几何变化巡检：拖动/缩放结束后把位置写回库
         SetTimer(NoteGeoTick, 800)
@@ -257,11 +275,13 @@ class App {
             "onDelete", NoteDelete,
             "onHide", NoteHide,
             "onRename", NoteRename,
+            "onExport", NoteExport,
             "onPin", NotePin,
             "onColor", NoteColor,
             "onShowAll", NoteShowAll,
             "onHideAll", NoteHideAll,
             "onDataDir", NoteDataDir,
+            "onSettings", NoteShowSettings,
             "onClose", NoteListClosed)
         ListWindow.Open()
     }
@@ -325,6 +345,73 @@ class App {
             NoteWindow.All[id].note := App.Store.Get(id)
         App.RefreshList()
         App.RefreshTray()
+    }
+
+    ; 导出（列表窗口的右键菜单走这里；便签窗口自己有一份 ExportAs）
+    static ExportNote(id, fmt) {
+        n := App.Store.Get(id)
+        if !n {
+            App.Toast("这张便签已经不在了")
+            return
+        }
+        Export.Save(n, fmt)
+    }
+
+    /* ---- 设置面板 -----------------------------------------------------------
+       页面只负责表单，合法性判断和"怎么生效"全在这儿，避免两边各写一套。 */
+
+    static ShowSettings() {
+        SettingsWindow.Ctx := App.Ctx
+        SettingsWindow.Hooks := Map(
+            "onSave", NoteApplySettings,
+            "onDataDir", NoteDataDir,
+            "onLog", NoteOpenLog)
+        SettingsWindow.Open()
+    }
+
+    /* 返回错误文案，空串 = 成功。
+       顺序很重要：先校验热键 → 全部合法才落盘 → 再逐项生效。
+       校验失败时要把原来的热键重新绑回去（TestHotkey 会临时注册再注销）。 */
+    static ApplySettings(raw) {
+        fs := JsonNum(raw, "fontSize", App.FONT_DEFAULT)
+        fs := Max(App.FONT_MIN, Min(App.FONT_MAX, fs))
+
+        hs := Map(
+            "new", Trim(JsonStr(raw, "hkNew", "")),
+            "list", Trim(JsonStr(raw, "hkList", "")),
+            "toggle", Trim(JsonStr(raw, "hkToggle", "")))
+
+        for name, key in hs {
+            if (key = "")
+                continue
+            e := App.TestHotkey(key)
+            if (e != "") {
+                App.RebindHotkeys(App.CfgHotkeys())
+                return "「" App.HotkeyLabel(name) "」" e
+            }
+        }
+
+        App.SetCfg("hotkey", "new", hs["new"])
+        App.SetCfg("hotkey", "list", hs["list"])
+        App.SetCfg("hotkey", "toggle", hs["toggle"])
+        showAll := JsonNum(raw, "showAllOnStart", 0) ? 1 : 0
+        openList := JsonNum(raw, "openListOnStart", 0) ? 1 : 0
+        App.SetCfg("app", "showAllOnStart", showAll)
+        App.SetCfg("app", "openListOnStart", openList)
+
+        App.SetFontSize(fs)
+        App.RebindHotkeys(hs)
+
+        tr := JsonNum(raw, "transparent", 1) ? 1 : 0
+        if (tr != (App.Ctx.appearance.transparent ? 1 : 0)) {
+            App.Ctx.appearance.transparent := tr
+            App.SetCfg("appearance", "transparent", tr)
+            ; 重建所有窗口是重活，别在消息线程里做
+            SetTimer(NoteReloadTick, -10)
+        }
+        App.Log("设置已保存：字号 " fs "，透明 " tr
+            "，启动显示全部 " showAll "，启动开列表 " openList)
+        return ""
     }
 
     /* ---- 字号 ---------------------------------------------------------------
@@ -398,6 +485,7 @@ class App {
         t.Add("全部显示", (*) => NoteShowAllSoon())
         t.Add("全部收起", (*) => App.HideAll())
         t.Add("透明外观", (*) => App.ToggleAppearance())
+        t.Add("设置…", (*) => NoteShowSettings())
         t.Add()
         t.Add("数据目录…", (*) => Run(App.DataDir))
         t.Add("打开日志", (*) => App.OpenLog())
@@ -430,10 +518,71 @@ class App {
     /* 不用 Map 装"热键->回调"：箭头函数写在 Map(...) 的参数里时配对极易出错，
        报错是 "Invalid callback function"（拿到的其实是字符串键）。顺序写清楚最稳。 */
     static BindHotkeys() {
-        App.BindOne(App.Cfg("hotkey", "new", "^!n"), NoteDeferNew)
-        App.BindOne(App.Cfg("hotkey", "list", "^!l"), NoteDeferList)
-        App.BindOne(App.Cfg("hotkey", "toggle", "^!h"), NoteToggle)
+        App.RebindHotkeys(App.CfgHotkeys())
         App.BindListKeys()
+    }
+
+    ; 配置里的三个热键原样读出来（设置面板保存失败时用它把状态恢复回去）
+    static CfgHotkeys() {
+        return Map(
+            "new", App.Cfg("hotkey", "new", "^!n"),
+            "list", App.Cfg("hotkey", "list", "^!l"),
+            "toggle", App.Cfg("hotkey", "toggle", "^!h"))
+    }
+
+    static HotkeyLabel(name) {
+        switch name {
+            case "new": return "新建便签"
+            case "list": return "打开便签列表"
+            case "toggle": return "显示/收起全部"
+        }
+        return name
+    }
+
+    static HotkeyFn(name) {
+        switch name {
+            case "new": return NoteDeferNew
+            case "list": return NoteDeferList
+            case "toggle": return NoteToggle
+        }
+        return 0
+    }
+
+    /* 先注销旧的再绑新的。App.Bound 记的是"真正注册成功了什么"，
+       不靠读配置 —— 配置里可能存着非法键，那种是绑不上的。 */
+    static RebindHotkeys(hs) {
+        if !IsObject(App.Bound)
+            App.Bound := Map()
+        for name, key in App.Bound.Clone() {
+            if (key = "")
+                continue
+            try Hotkey(key, "Off")
+        }
+        App.Bound := Map()
+        for name, key in hs {
+            if (key = "")
+                continue
+            if App.BindOne(key, App.HotkeyFn(name)) {
+                App.Bound[name] := key
+                App.Log("热键已注册：" App.HotkeyLabel(name) " = " key)
+            } else
+                App.Log("热键注册失败：" App.HotkeyLabel(name) " = " key)
+        }
+    }
+
+    /* 试注册一次看合不合法。它有副作用：成功时会真的注册上，紧接着的 "Off"
+       又注销掉，所以调用方必须在之后整体重绑一次。 */
+    static TestHotkey(key) {
+        key := Trim(key)
+        if (key = "")
+            return ""
+        try {
+            Hotkey(key, (*) => 0, "On")
+            Hotkey(key, "Off")
+            return ""
+        } catch as e {
+            return "不是合法的热键（" CleanComError(e.Message) "）"
+        }
     }
 
     /* 列表窗口里的 Ctrl+N。
@@ -456,12 +605,18 @@ class App {
 
     /* 热键回调会被传入"触发的热键名"这一个参数，而 AHK 在调用点严格检查个数。
        所以统一套一层变参箭头吃掉它（和菜单的 MB 是同一个坑）。 */
+    ; 返回 1/0：注册失败（键名非法、被别的程序占了）不算致命，但调用方要知道，
+    ; 否则设置面板会把"根本没绑上"当成保存成功
     static BindOne(key, fn) {
-        if (key = "")
-            return
-        try Hotkey(key, (*) => fn.Call(), "On")
-        catch as e
+        if (key = "" || !fn)
+            return 0
+        try {
+            Hotkey(key, (*) => fn.Call(), "On")
+            return 1
+        } catch as e {
             App.Log("热键 " key " 注册失败：" CleanComError(e.Message))
+            return 0
+        }
     }
 
     ; 透明外观开关：改配置后整体重建窗口（DefaultBackgroundColor 只在建窗口时设得进去）
@@ -610,6 +765,11 @@ class App {
         text .= "new=^!n`r`n"
         text .= "list=^!l`r`n"
         text .= "toggle=^!h`r`n`r`n"
+        text .= "[app]`r`n"
+        text .= "; 启动时把所有便签都显示出来（否则只恢复上次没收起的）`r`n"
+        text .= "showAllOnStart=0`r`n"
+        text .= "; 启动时打开便签列表`r`n"
+        text .= "openListOnStart=0`r`n`r`n"
         text .= "[debug]`r`n"
         text .= "; 1 = 允许 F12 打开开发者工具（排查页面问题用）`r`n"
         text .= "devtools=0`r`n"
@@ -973,6 +1133,12 @@ RichEval(w, js) {
     }
 }
 
+/* ExecuteScriptAsync 的返回值是 JSON 编码过的：数字原样，字符串会带引号
+   （"1" 而不是 1），尖括号还会被转成 \u003C。断言前统一走这里。 */
+JStr(v) {
+    return Trim(StrReplace(v, Chr(34), ""))
+}
+
 RichSay(name, ok, detail := "") {
     global RICH_PASS, RICH_FAIL
     if ok
@@ -980,6 +1146,329 @@ RichSay(name, ok, detail := "") {
     else
         RICH_FAIL += 1
     App.Log((ok ? "PASS " : "FAIL ") name (detail != "" ? "  [" detail "]" : ""))
+}
+
+; 临时：给 README 拍一张设置面板的截图
+ShotSettings(path) {
+    w := SettingsWindow.Win
+    if !w
+        return false
+    pStream := 0
+    hr := DllCall("ole32\CreateStreamOnHGlobal", "ptr", 0, "int", 1, "ptr*", &pStream, "int")
+    if (hr != 0 || !pStream)
+        return false
+    try {
+        w.wv.CapturePreviewAsync(0, pStream).await()
+        hGlobal := 0
+        DllCall("ole32\GetHGlobalFromStream", "ptr", pStream, "ptr*", &hGlobal)
+        size := DllCall("kernel32\GlobalSize", "ptr", hGlobal, "uptr")
+        p := DllCall("kernel32\GlobalLock", "ptr", hGlobal, "ptr")
+        if (!p || !size)
+            return false
+        data := Buffer(size)
+        DllCall("RtlMoveMemory", "ptr", data, "ptr", p, "uptr", size)
+        DllCall("kernel32\GlobalUnlock", "ptr", hGlobal)
+        if FileExist(path)
+            FileDelete path
+        f := FileOpen(path, "w")
+        f.RawWrite(data, size)
+        f.Close()
+        return true
+    }
+    return false
+}
+
+SelfTestShotSettings() {
+    try {
+        App.ShowSettings()
+        Sleep 3000
+        ok := ShotSettings(A_ScriptDir "\assets\shot-settings.png")
+        App.Log("SHOT settings=" ok)
+    }
+    SettingsWindow.Close()
+    SelfTestDone()
+}
+
+/* 自检：设置面板。分两段验：
+   1) 窗口能开、页面能收到 init（用 ExecuteScript 读回表单值来证明）
+   2) ApplySettings 真能落盘并生效，且非法热键会被拦下、原配置不被动坏 */
+SelfTestSettings() {
+    try SelfTestSettingsRun()
+    catch as e {
+        App.Log("SELFTEST SETTINGS 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST SETTINGS 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestSettingsRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+
+    ; 记下原始值，测完恢复，别把测试配置留在用户机器上
+    oldFs := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
+    oldHk := App.Cfg("hotkey", "new", "^!n")
+    oldAll := App.Cfg("app", "showAllOnStart", 0)
+
+    App.ShowSettings()
+    Sleep 2600
+    RichSay("设置窗口打开了", SettingsWindow.IsOpen() = 1)
+
+    w := SettingsWindow.Win
+    if !w {
+        App.Log("SELFTEST SETTINGS 结论：未通过（窗口没建起来）")
+        return
+    }
+
+    ; 页面侧：字段应该已经被 init 填好
+    fsInPage := JStr(RichEval(w, "document.getElementById('fontSize').value"))
+    hkInPage := JStr(RichEval(w, "document.getElementById('hkNew').value"))
+    RichSay("页面读到了字号", fsInPage = String(oldFs), fsInPage " vs " oldFs)
+    RichSay("页面读到了热键", hkInPage = oldHk, hkInPage " vs " oldHk)
+
+    ; 非法热键：应当报错，且配置不被改坏
+    badRaw := '{"type":"save","fontSize":19,"transparent":1,"showAllOnStart":0,'
+        . '"openListOnStart":0,"hkNew":"Ctrl+","hkList":"","hkToggle":""}'
+    err := App.ApplySettings(badRaw)
+    RichSay("非法热键被拦下", err != "", err)
+    RichSay("拦截后字号没被改", App.Cfg("appearance", "fontSize", App.FONT_DEFAULT) = oldFs)
+    RichSay("拦截后原热键仍注册着", App.Bound.Has("new") && App.Bound["new"] = oldHk,
+        App.Bound.Has("new") ? App.Bound["new"] : "(无)")
+
+    ; 合法保存：字号 + 新热键 + 启动显示全部
+    goodRaw := '{"type":"save","fontSize":18,"transparent":1,"showAllOnStart":1,'
+        . '"openListOnStart":0,"hkNew":"^!j","hkList":"^!l","hkToggle":""}'
+    err2 := App.ApplySettings(goodRaw)
+    RichSay("合法配置保存成功", err2 = "", err2)
+    RichSay("字号立即生效", App.Ctx.appearance.fontSize = 18, App.Ctx.appearance.fontSize)
+    ; 落盘是 400ms 合并写（按住 Ctrl+滚轮 会连发几十次），所以等一下再看文件
+    Sleep 700
+    RichSay("字号已落盘", App.Cfg("appearance", "fontSize", 0) = 18,
+        App.Cfg("appearance", "fontSize", 0))
+    RichSay("新热键已注册", App.Bound.Has("new") && App.Bound["new"] = "^!j",
+        App.Bound.Has("new") ? App.Bound["new"] : "(无)")
+    RichSay("清空的热键不再注册", !App.Bound.Has("toggle"), App.Bound.Has("toggle") ? 1 : 0)
+    RichSay("启动项已落盘", App.Cfg("app", "showAllOnStart", 0) = 1)
+
+    ; 改回来
+    backRaw := '{"type":"save","fontSize":' oldFs ',"transparent":1,'
+        . '"showAllOnStart":' (oldAll ? 1 : 0) ',"openListOnStart":0,'
+        . '"hkNew":' JsonQuote(oldHk) ',"hkList":"^!l","hkToggle":"^!h"}'
+    err3 := App.ApplySettings(backRaw)
+    RichSay("恢复原配置", err3 = "", err3)
+    RichSay("恢复后热键回来了", App.Bound.Has("new") && App.Bound["new"] = oldHk,
+        App.Bound.Has("new") ? App.Bound["new"] : "(无)")
+    ; 字号写盘是 400ms 合并的，不等一下就直接退出进程，定时器被掐掉，
+    ; 配置会停在测试值上（第一次跑就踩了：用户拿到的是 18）
+    Sleep 700
+    RichSay("字号已恢复", App.Cfg("appearance", "fontSize", 0) = oldFs,
+        App.Cfg("appearance", "fontSize", 0))
+
+    SettingsWindow.Close()
+    Sleep 300
+    RichSay("设置窗口能关掉", SettingsWindow.IsOpen() = 0)
+
+    App.Log("SELFTEST SETTINGS 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+}
+
+/* 自检：四种导出格式。不走 FileSelect（会卡住无人值守的测试），
+   直接调 Export.Render 拿字符串断言，顺带真写一个 txt 验编码。 */
+SelfTestExport() {
+    try SelfTestExportRun()
+    catch as e {
+        App.Log("SELFTEST EXPORT 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST EXPORT 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestExportRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    BT := Chr(96)
+
+    ; 一张 1x1 的 PNG 落在图片目录里，用来验 HTML 的内嵌图片
+    imgDir := App.DataDir "\images"
+    if !DirExist(imgDir)
+        DirCreate imgDir
+    imgPath := imgDir "\_export-test.png"
+    b64 := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    buf := NoteWindow.B64Decode(b64)
+    try {
+        f := FileOpen(imgPath, "w")
+        f.RawWrite(buf, buf.Size)
+        f.Close()
+    }
+
+    md := "# 标题一`n`n"
+    md .= "普通**粗体**和*斜体*，还有~~删除线~~和" BT "code" BT "。`n`n"
+    md .= "- 列表项`n- [ ] 待办一`n- [x] 待办二`n`n"
+    md .= "1. 有序一`n2. 有序二`n`n"
+    md .= "> 引用一行`n`n"
+    md .= BT BT BT "js`nvar a = 1;`n" BT BT BT "`n`n"
+    md .= "---`n`n"
+    md .= "[链接](https://example.com) 和 ![图](" NoteWindow.FileUrl(imgPath) ")`n"
+
+    note := {
+        title: "导出测试：标题/含非法字符",
+        body_md: md,
+        body_text: "标题一`n`n普通粗体和斜体，还有删除线和 code。`n`n列表项`n待办一`n待办二",
+        body_html: "<h1>标题一</h1><p>普通<b>粗体</b>和<i>斜体</i></p>"
+            . "<p><img src=`"" NoteWindow.FileUrl(imgPath) "`" alt=`"图`"></p>",
+        mode: "rich"
+    }
+
+    ; ---- TXT：纯文本，不能残留任何标记 ----
+    txt := Export.Render(note, "txt")
+    RichSay("TXT 用 body_text 原文", InStr(txt, "普通粗体和斜体") > 0, SubStr(txt, 1, 40))
+    RichSay("TXT 不含 HTML 标签", InStr(txt, "<") = 0 && InStr(txt, "**") = 0)
+    RichSay("TXT 不含 Markdown 标记", InStr(txt, "~~") = 0 && InStr(txt, "# ") = 0)
+
+    ; ---- MD ----
+    mdOut := Export.Render(note, "md")
+    RichSay("MD 原样输出 body_md", mdOut = md, SubStr(mdOut, 1, 30))
+
+    ; ---- HTML ----
+    html := Export.Render(note, "html")
+    RichSay("HTML 有完整文档结构", InStr(html, "<!DOCTYPE html>") > 0 && InStr(html, "</html>") > 0)
+    RichSay("HTML 保留正文标签", InStr(html, "<h1>标题一</h1>") > 0)
+    RichSay("HTML 图片内嵌成 data URI", InStr(html, "data:image/png;base64,iVBOR") > 0)
+    RichSay("HTML 不再引用 file://", InStr(html, "file:///") = 0)
+    RichSay("HTML 标题做了转义处理", InStr(html, "<title>导出测试") > 0)
+
+    ; ---- RTF ----
+    rtf := Export.Render(note, "rtf")
+    RichSay("RTF 头部正确", SubStr(rtf, 1, 6) = "{\rtf1", SubStr(rtf, 1, 20))
+    RichSay("RTF 中文转成 \\uNNNN", InStr(rtf, "\u") > 0)
+    RichSay("RTF 没有裸中文", !RegExMatch(rtf, "[^\x00-\x7F]"))
+    RichSay("RTF 粗体/斜体/删除线", InStr(rtf, "{\b ") > 0 && InStr(rtf, "{\i ") > 0 && InStr(rtf, "{\strike ") > 0)
+    RichSay("RTF 列表与待办", InStr(rtf, "\bullet") > 0 && InStr(rtf, "\u9744") > 0)
+    RichSay("RTF 代码块用等宽字体", InStr(rtf, "\f1\fs18 ") > 0)
+    RichSay("RTF 链接用 HYPERLINK 域", InStr(rtf, "HYPERLINK") > 0)
+    RichSay("RTF 花括号配对（粗检）", Export_RtfBalanced(rtf))
+
+    ; ---- 真写一个文件，验编码（BOM + 中文） ----
+    outTxt := App.DataDir "\_export-test.txt"
+    try {
+        f := FileOpen(outTxt, "w", "UTF-8")
+        f.Write(txt)
+        f.Close()
+    }
+    raw := ""
+    try raw := FileRead(outTxt, "UTF-8")
+    RichSay("TXT 落盘可回读", InStr(raw, "普通粗体和斜体") > 0)
+
+    ; ---- 文件名清洗 ----
+    stem := Export.FileStem(note)
+    RichSay("文件名过滤了非法字符", !RegExMatch(stem, '[\\/:*?"<>|]'), stem)
+
+    App.Log("SELFTEST EXPORT 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+
+    ; 清理
+    for f2 in [outTxt, imgPath]
+        try FileDelete f2
+}
+
+/* RTF 的括号必须严格配对，否则 Word 直接报"无法打开"。
+   快速数一遍（\\ 后的花括号是转义的，不算结构）。 */
+Export_RtfBalanced(s) {
+    depth := 0
+    Loop StrLen(s) {
+        ch := SubStr(s, A_Index, 1)
+        if (ch = "\") {
+            A_Index += 1
+            continue
+        }
+        if (ch = "{")
+            depth++
+        else if (ch = "}") {
+            depth--
+            if (depth < 0)
+                return false
+        }
+    }
+    return depth = 0
+}
+
+/* 自检：Ctrl+V 粘贴链路 / 图片限高与看大图 / 右上角 X 改成收起。
+   本机注入物理键盘会卡死（见 README），所以这里直接往 document.body 上
+   dispatch 一个 ClipboardEvent —— 这恰好能验到最关键的一点：监听挂在
+   document 上，焦点不在编辑区也照样收得到（用户报的 Ctrl+V 失效正是这个）。 */
+SelfTestNote() {
+    try SelfTestNoteRun()
+    catch as e {
+        App.Log("SELFTEST NOTE 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST NOTE 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestNoteRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+
+    w := App.NewNote()
+    if !w {
+        App.Log("SELFTEST NOTE 没能建出便签")
+        return
+    }
+    id := w.id
+    Loop 40 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("页面就绪", w.ready = 1, w.ready)
+
+    /* 1) 粘到 body 上（模拟"焦点不在编辑区"）：画一张图塞进 DataTransfer，
+         再派发 paste。内容不经过系统剪贴板，但走的是同一条页面代码路径。 */
+    imgDir := App.DataDir "\images"
+    before := 0
+    Loop Files (imgDir "\*.*")
+        before++
+
+    RichEval(w, "(function(){var c=document.createElement('canvas');c.width=8;c.height=8;"
+        . "var g=c.getContext('2d');g.fillStyle='#d04040';g.fillRect(0,0,8,8);"
+        . "var b=atob(c.toDataURL('image/png').split(',')[1]);"
+        . "var a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);"
+        . "var dt=new DataTransfer();dt.items.add(new File([a],'x.png',{type:'image/png'}));"
+        . "document.body.dispatchEvent(new ClipboardEvent('paste',{clipboardData:dt,bubbles:true,cancelable:true}));"
+        . "return 1})()")
+    Sleep 2000
+
+    hasImg := RichEval(w, "document.querySelector('#editor img')?1:0")
+    after := 0
+    Loop Files (imgDir "\*.*")
+        after++
+    RichSay("粘贴到 body 也能插图（焦点无关）", JStr(hasImg) = "1", hasImg)
+    RichSay("图片落盘", after = before + 1, before " -> " after)
+
+    /* 2) 限高：正文里的图 max-height 必须是 180px，否则大图会把便签撑满 */
+    mh := RichEval(w, "(function(){var i=document.querySelector('#editor img');"
+        . "return i?getComputedStyle(i).maxHeight:'NONE'})()")
+    mh := JStr(mh)
+    RichSay("图片被限高（max-height）", mh = "180px", mh)
+
+    /* 3) 点图 → 遮罩出现；再点遮罩 → 关掉 */
+    out := RichEval(w, "(function(){var i=document.querySelector('#editor img');i.click();"
+        . "return document.getElementById('lightbox').hidden?'0':'1'})()")
+    RichSay("点图片打开大图遮罩", JStr(out) = "1", out)
+    boxed := RichEval(w, "(function(){var l=document.getElementById('lightbox');"
+        . "var src=document.getElementById('lightboxImg').getAttribute('src')||'';"
+        . "l.click();return (src.indexOf('file:///')>=0 && l.hidden)?'1':'0'})()")
+    RichSay("遮罩里是原图且能关掉", JStr(boxed) = "1", boxed)
+
+    /* 4) X = 收起（不是删除）：便签还在库里，只是 hidden=1 */
+    RichEval(w, "document.getElementById('btnClose').click();1")
+    Sleep 900
+    row := App.Store.Get(id)
+    RichSay("点 X 后便签还在库里", IsObject(row) ? 1 : 0)
+    RichSay("点 X 只收起不删除（hidden=1）", row && row.hidden = 1, row ? row.hidden : "no row")
+
+    App.Log("SELFTEST NOTE 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+
+    ; 收尾：自检建的这张删掉，别留在用户库里
+    App.DeleteNote(id)
 }
 
 /* 通用流程：塞文字 → 全选 → 点按钮 → 看 DOM 与 Markdown。
@@ -1017,11 +1506,21 @@ NoteOpen(id) => App.OpenNote(id)
 NoteDelete(id) => App.DeleteNote(id)
 NoteHide(id) => App.HideNote(id)
 NoteRename(id) => App.RenameNote(id)
+NoteExport(id, fmt) => App.ExportNote(id, fmt)
+NoteApplySettings(raw) => App.ApplySettings(raw)
+/* 打开设置要建 WebView2 controller（await），绝不能在菜单回调/COM 回调里直接做
+   —— 那会重现"点完菜单什么都没反应"的老 bug。统一换到独立线程。 */
+NoteShowSettings() {
+    SetTimer(NoteOpenSettings, -10)
+}
+
+NoteOpenSettings() => App.ShowSettings()
 NotePin(id, on) => App.SetPin(id, on)
 NoteColor(id, color) => App.SetColor(id, color)
 NoteShowAll() => App.ShowAll()
 NoteHideAll() => App.HideAll()
 NoteDataDir() => App.OpenDataDir()
+NoteOpenLog() => App.OpenLog()
 NoteListClosed() => App.RefreshTray()
 NoteGeoTick() => App.GeoTick()
 
