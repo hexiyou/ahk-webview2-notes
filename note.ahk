@@ -166,6 +166,8 @@ class App {
             SetTimer(SelfTestSettings, -2500)
         if App.HasArg("--selftest-dialog")
             SetTimer(SelfTestDialog, -2500)
+        if App.HasArg("--selftest-del")
+            SetTimer(SelfTestDelete, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -882,7 +884,9 @@ class App {
         text .= "; 设置面板里的「新建便签的颜色」改的就是这一项`r`n"
         text .= "color=yellow`r`n"
         text .= "; 列表窗口是否置顶（列表右上角的图钉按钮也会改这里）`r`n"
-        text .= "listTopmost=0`r`n`r`n"
+        text .= "listTopmost=0`r`n"
+        text .= "; 下面两行是窗口上次的大小/位置，格式 x,y,w,h，程序自己写，不用手改`r`n"
+        text .= "; listGeo=、settingsGeo=`r`n`r`n"
         text .= "[hotkey]`r`n"
         text .= "; 留空表示不注册该热键`r`n"
         text .= "new=^!n`r`n"
@@ -1051,18 +1055,44 @@ SelfTestList() {
     /* 拖边框改尺寸：WebView2 的 controller 不会自己跟着父窗口长，全靠 Gui 的
        Size 事件里补一次 Fill()。判据看页面自己的 clientWidth —— 窗口变大而
        controller 没跟上时，页面根本不知道，viewport 不会动。 */
-    resized := 0
+    resized := 0, minSized := 0, geoKept := 0
+    oldGeo := App.Cfg("window", "listGeo", "")
     if ListWindow.Win {
-        r := Win.Rect(ListWindow.Win.gui.Hwnd)
+        hw := ListWindow.Win.gui.Hwnd
+        r := Win.Rect(hw)
         cw0 := App.EvalNum(ListWindow.Win, "document.documentElement.clientWidth")
-        WinMove(r.x, r.y, r.w + 160, r.h + 80, "ahk_id " ListWindow.Win.gui.Hwnd)
+        WinMove(r.x, r.y, r.w + 160, r.h + 80, "ahk_id " hw)
         Sleep 500
         cw1 := App.EvalNum(ListWindow.Win, "document.documentElement.clientWidth")
-        WinMove(r.x, r.y, r.w, r.h, "ahk_id " ListWindow.Win.gui.Hwnd)
+        WinMove(r.x, r.y, r.w, r.h, "ahk_id " hw)
         Sleep 500
         cw2 := App.EvalNum(ListWindow.Win, "document.documentElement.clientWidth")
         App.Log("SELFTEST 列表重铺 viewport：" cw0 " -> " cw1 " -> " cw2)
         resized := (cw1 > cw0 + 100 && cw2 < cw1 - 100)
+
+        ; 下限：硬拖到 200x150，WM_GETMINMAXINFO 应该把它挡在 380x300 以上
+        WinMove(r.x, r.y, 200, 150, "ahk_id " hw)
+        Sleep 600
+        r2 := Win.Rect(hw)
+        App.Log("SELFTEST 列表最小尺寸：拖到 200x150 后实际 " r2.w "x" r2.h "（期望 ≥380x300）")
+        minSized := (r2.w >= 380 && r2.h >= 300)
+
+        ; 尺寸记忆：改大小 → 关 → 再开，外框尺寸要一模一样
+        ; （比对"改之前的实测值"而不是 WinMove 传的值：WinMove 设的是客户区，
+        ;   Gui.Show 的 w/h 设的是外框，两者差一圈边框，拿请求值当期望会假失败）
+        WinMove(r.x, r.y, 620, 520, "ahk_id " hw)
+        Sleep 700
+        rb := Win.Rect(hw)
+        ListWindow.Close()
+        Sleep 600
+        App.ShowList()
+        Sleep 2400
+        geoKept := 0
+        if ListWindow.Win {
+            r3 := Win.Rect(ListWindow.Win.gui.Hwnd)
+            App.Log("SELFTEST 列表尺寸记忆：关前 " rb.w "x" rb.h "，重开后 " r3.w "x" r3.h)
+            geoKept := (r3.w = rb.w && r3.h = rb.h)
+        }
     }
 
     before := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
@@ -1074,7 +1104,57 @@ SelfTestList() {
     Sleep 700
     back := App.Cfg("appearance", "fontSize", App.FONT_DEFAULT)
     App.Log("SELFTEST 字号已恢复为 " back)
-    App.Log("SELFTEST 结论：" (open && resized && got = before + 1 && back = before ? "通过" : "未通过"))
+    ; 别把测试尺寸留在用户的 config.ini 里（原来是空就写回空，LoadGeo 认这个）
+    App.SetCfg("window", "listGeo", oldGeo)
+    allOK := open && resized && minSized && geoKept && got = before + 1 && back = before
+    App.Log("SELFTEST 结论：" (allOK ? "通过" : "未通过"))
+    SelfTestDone()
+}
+
+/* 自检：右键菜单/页面按钮改完数据后，列表要立刻跟着变。
+   这两条路以前不一致 —— 页面按钮是 Handle 里统一 Push 的，右键菜单直接调 Call，
+   漏了那一步。现象：右键删除后那一行还赖在列表里，手快再点它就报"便签已被删除"。
+   这里同时盯删除（两种入口）和置顶（改完要立刻长出"置顶"角标）。 */
+SelfTestDelete() {
+    ids := []
+    ids.Push(App.Store.Create(Map("title", "删我1", "body_text", "a")))
+    ids.Push(App.Store.Create(Map("title", "删我2", "body_text", "b")))
+    ids.Push(App.Store.Create(Map("title", "留着我", "body_text", "c")))
+    App.ShowList()
+    Sleep 2600
+    if !ListWindow.Win {
+        App.Log("SELFTEST DEL 列表没开")
+        SelfTestDone()
+        return
+    }
+    n0 := App.EvalNum(ListWindow.Win, "document.querySelectorAll('#list .item').length")
+    App.Log("SELFTEST DEL 删除前条数=" n0)
+
+    ; 1) 页面上的 ✕ 按钮（Handle 那条路）
+    ListWindow.Win.wv.ExecuteScript("(function(){var r=document.querySelector('#list .item[data-id="
+        . Chr(34) ids[1] Chr(34) "]');r.querySelector('.ops button.del').click();return 1})()")
+    Sleep 700
+    n1 := App.EvalNum(ListWindow.Win, "document.querySelectorAll('#list .item').length")
+    App.Log("SELFTEST DEL 点 ✕ 删 id=" ids[1] " 后条数=" n1 "（期望 " (n0 - 1) "）")
+
+    ; 2) 右键菜单的「删除…」（走菜单回调，不经 Handle）—— 顺带删一张正开着的
+    try App.OpenNote(ids[2])
+    Sleep 800
+    ListMenuDelete(ids[2]).Call()
+    Sleep 700
+    n2 := App.EvalNum(ListWindow.Win, "document.querySelectorAll('#list .item').length")
+    App.Log("SELFTEST DEL 菜单删开着窗口的 id=" ids[2] " 后条数=" n2 "（期望 " (n0 - 2) "）")
+
+    ; 3) 菜单置顶：角标要立刻出现，别等下一次刷新
+    ListMenuPin(ids[3], 1).Call()
+    Sleep 700
+    pin := App.EvalNum(ListWindow.Win, "document.querySelectorAll('#list .pin').length")
+    App.Log("SELFTEST DEL 菜单置顶后角标数=" pin "（期望 1）")
+
+    ; 收摊：别把测试便签留在用户库里
+    try App.DeleteNote(ids[3])
+    Sleep 300
+    App.Log("SELFTEST DEL 结论：" (n1 = n0 - 1 && n2 = n0 - 2 && pin = 1 ? "通过" : "未通过"))
     SelfTestDone()
 }
 
@@ -1490,6 +1570,7 @@ SelfTestSettingsRun() {
     oldHk := App.Cfg("hotkey", "new", "^!n")
     oldAll := App.Cfg("app", "showAllOnStart", 0)
     oldColor := App.Cfg("window", "color", "yellow")
+    oldSGeo := App.Cfg("window", "settingsGeo", "")
 
     App.ShowSettings()
     Sleep 2600
@@ -1529,6 +1610,9 @@ SelfTestSettingsRun() {
     vw2 := App.EvalNum(w, "document.documentElement.clientWidth")
     RichSay("拖大窗口后页面跟着重铺", vw1 > vw0 + 100 && vw2 < vw1 - 100,
         vw0 " -> " vw1 " -> " vw2)
+    Sleep 600                          ; 等 400ms 防抖写盘
+    geoNow := App.Cfg("window", "settingsGeo", "")
+    RichSay("尺寸变了会写进 settingsGeo", geoNow != "", geoNow)
 
     ; 非法热键：应当报错，且配置不被改坏
     badRaw := '{"type":"save","fontSize":19,"transparent":1,"showAllOnStart":0,'
@@ -1568,6 +1652,8 @@ SelfTestSettingsRun() {
         App.Bound.Has("new") ? App.Bound["new"] : "(无)")
     RichSay("默认颜色已恢复", App.Cfg("window", "color", "blue") = oldColor,
         App.Cfg("window", "color", "blue"))
+    ; 别把测试尺寸留在用户的 config.ini 里
+    App.SetCfg("window", "settingsGeo", oldSGeo)
 
     ; 没带 defColor 的老消息不能把默认颜色清成黄色
     App.ApplySettings('{"type":"save","fontSize":' oldFs ',"transparent":1,'

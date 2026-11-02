@@ -70,8 +70,8 @@ runtime\AutoHotkey64.exe note.ahk
 | Markdown | `Ctrl+M` 在所见即所得和源码之间切换，两边双向转换 |
 | 字号缩放 | 编辑区 `Ctrl+滚轮` 实时放大 / 缩小（10~32px），所有便签一起变并记住 |
 | 自动保存 | 停止输入 400ms 自动落库，关窗/收起/失焦时补一次 |
-| 位置记忆 | 关掉重开，位置、尺寸、颜色、置顶状态都还原 |
-| 列表与搜索 | `Ctrl+Alt+L` 打开总览，按关键字全文搜索（含已收起的便签）；列表自己也能置顶（右上角图钉） |
+| 位置记忆 | 关掉重开，位置、尺寸、颜色、置顶状态都还原；列表和设置面板也各自记住自己的大小/位置 |
+| 列表与搜索 | `Ctrl+Alt+L` 打开总览，按关键字全文搜索（含已收起的便签）；列表自己也能置顶（右上角图钉）、可拖边框改大小（有最小尺寸） |
 | 右键菜单 | 便签和列表都支持，用的是系统原生菜单（能超出小窗口边界） |
 | 托盘常驻 | 全局热键随时新建/呼出，关掉便签窗口不退出进程 |
 | **外部调用** | **别的程序发一条窗口消息就能新建便签（纯文本或 JSON），还能拿回新便签的 id** —— 不起 HTTP、不装插件。见 [docs/ipc.md](docs/ipc.md) |
@@ -202,6 +202,8 @@ width=300            ; 新建便签的默认宽
 height=280
 color=yellow         ; 新建便签的默认颜色：yellow/pink/blue/green/purple/gray
 listTopmost=0        ; 1=列表窗口一直置顶（列表右上角的图钉也会改这里）
+listGeo=             ; 列表窗口上次的大小/位置，格式 x,y,w,h（程序自己写，别手改）
+settingsGeo=         ; 设置面板同上
 
 [hotkey]
 new=^!n              ; 留空表示不注册
@@ -403,8 +405,11 @@ runtime\AutoHotkey64.exe note.ahk --selftest-menu
 runtime\AutoHotkey64.exe note.ahk --selftest-keys
 
 # 程序级自检：延迟入口能不能真的把列表打开（回归"点菜单没反应"）+
-#              拖边框改窗口大小后页面有没有跟着重铺
+#              拖边框改窗口大小后页面有没有跟着重铺 + 尺寸下限 + 尺寸记忆
 runtime\AutoHotkey64.exe note.ahk --selftest-list
+
+# 程序级自检：删/置顶之后列表要立刻刷新（页面 ✕ 按钮与右键菜单两条路）
+runtime\AutoHotkey64.exe note.ahk --selftest-del
 
 # 程序级自检：Ctrl+滚轮 字号（合成 WheelEvent，验放大/上下限/落盘）
 runtime\AutoHotkey64.exe note.ahk --selftest-font
@@ -852,3 +857,23 @@ pwsh -File tools/make-icon.ps1
     窗口过程里，最及时。
     自检判据要看**页面自己的 `document.documentElement.clientWidth`**，不能只看窗口宽度：
     controller 没跟上时，窗口明明变宽了而页面一无所知，viewport 一点没动，只有这个断言抓得住。
+
+58. **右键菜单改完数据必须自己回推一次列表。** 列表页有两条入口：页面上的按钮（✕ 收起 /
+    ✕ 删除）走 `Handle`，末尾统一 `Push`；右键菜单走 `Menu.Show` 的回调，是另一条路。
+    第一版菜单只调了宿主钩子、没补 `Push`，于是"右键删除后那一行还赖在列表里，手快再点
+    它一下就报『便签已经被删除』"（用户报的）。新建/改名/置顶/换色/收起 全是同一个毛病。
+    现在统一走 `ListWindow.CallThenPush()`：调完钩子立刻把新列表推下去。
+    教训：**同一个动作有两个入口时，收尾逻辑要么做成唯一出口，要么两边各写一遍并且都写对。**
+
+59. **存窗口几何要存"客户区"，不是外框。** `Gui.Show("w" w " h" h)` 的 w/h 说的是
+    **客户区**，而 `WinGetPos` / `Win.Rect` 给的是**外框**。第一版把外框写进配置、再拿外框
+    去 `Show`，结果每开一次窗口就长一圈边框（这台机器上 14px）—— `--selftest-list` 的
+    "尺寸记忆"那条断言（关前 620x520，重开后 634x534）当场抓到。现在存 `Win.ClientSize()`
+    拿到的客户区（`[window] listGeo/settingsGeo`），位置仍存外框的 x/y。
+    读回来还要过 `Win.Clamp`：上次可能是在另一块屏或更大的分辨率上拖的，直接照搬会开到
+    看不见的地方去。
+
+60. **尺寸下限要拦 `WM_GETMINMAXINFO(0x0024)`。** Gui 没有"最小尺寸"这种选项，能一路拖成
+    一条缝。挂 `OnMessage(0x0024, ...)`，`lParam` 指向 `MINMAXINFO`，`ptMinTrackSize` 在
+    偏移 24(x) / 28(y)，按 hwnd 认窗口再 `NumPut`。列表 380×300、设置 460×420。
+    注意回调必须按 hwnd 过滤（这个窗口消息是全局的），不然会把便签窗口也一起限制住。

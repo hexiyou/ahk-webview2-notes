@@ -44,13 +44,11 @@ class SettingsWindow {
         ; 同列表窗口：不接 Size，拖大窗口后页面还停在原尺寸（右边一片空白）
         g.OnEvent("Size", SettingsOnSize)
 
-        wa := Win.WorkArea()
-        w := Max(420, Min(520, wa.w - 60))
-        h := Max(520, Min(700, wa.h - 80))
-        x := Max(0, wa.l + (wa.w - w) // 2)
-        y := Max(0, wa.t + (wa.h - h) // 2 - 20)
-        g.Show("w" w " h" h " x" x " y" y)
+        geo := SettingsWindow.LoadGeo()
+        g.Show("w" geo.w " h" geo.h " x" geo.x " y" geo.y)
         Win.RoundCorners(g.Hwnd, true)
+        ; 尺寸下限：表单挤到 200 宽就没法看了
+        OnMessage(0x0024, SettingsMinSize)
 
         try {
             wvc := WebView2.CreateControllerAsync(g.Hwnd, 0, ctx.dataDir, "", ctx.dllPath).await()
@@ -83,6 +81,7 @@ class SettingsWindow {
     static Close() {
         if !SettingsWindow.Win
             return
+        SettingsWindow.SaveGeo()
         try SettingsWindow.Win.wvc.Close()
         try SettingsWindow.Win.gui.Destroy()
         SettingsWindow.Win := 0
@@ -101,6 +100,42 @@ class SettingsWindow {
         if (minMax = -1)
             return
         SettingsWindow.Refill()
+        SetTimer(SettingsSaveGeoSoon, -400)
+    }
+
+    /* 默认摆中间。工作区可能是 0（远程/无显示器），Min 之后会变负数，
+       Gui.Show 直接抛错，所以上下限都要有。 */
+    static DefaultGeo() {
+        wa := Win.WorkArea()
+        w := Max(420, Min(520, wa.w - 60))
+        h := Max(520, Min(700, wa.h - 80))
+        x := Max(0, wa.l + (wa.w - w) // 2)
+        y := Max(0, wa.t + (wa.h - h) // 2 - 20)
+        return { x: x, y: y, w: w, h: h }
+    }
+
+    ; 跟列表窗口同一套：一行 "x,y,w,h"，读出来过 Win.Clamp 防"上次在另一块屏"
+    static LoadGeo() {
+        d := SettingsWindow.DefaultGeo()
+        s := App.Cfg("window", "settingsGeo", "")
+        if (s = "")
+            return d
+        p := StrSplit(s, ",")
+        if (p.Length != 4)
+            return d
+        if !(IsNumber(p[1]) && IsNumber(p[2]) && IsNumber(p[3]) && IsNumber(p[4]))
+            return d
+        return Win.Clamp(p[1] + 0, p[2] + 0, Max(p[3] + 0, 460), Max(p[4] + 0, 420))
+    }
+
+    static SaveGeo() {
+        if !SettingsWindow.Win
+            return
+        r := Win.Rect(SettingsWindow.Win.gui.Hwnd)
+        c := Win.ClientSize(SettingsWindow.Win.gui.Hwnd)
+        if (c.w < 200 || c.h < 150)
+            return
+        try App.SetCfg("window", "settingsGeo", r.x "," r.y "," c.w "," c.h)
     }
 
     static StartMove() {
@@ -204,6 +239,16 @@ SettingsRefill() {
 
 SettingsOnSize(g, minMax, w, h) {
     SettingsWindow.OnSize(minMax)
+}
+
+SettingsSaveGeoSoon() => SettingsWindow.SaveGeo()
+
+/* WM_GETMINMAXINFO：设置面板的下限。表单挤窄了标签和输入框会叠在一起。 */
+SettingsMinSize(wParam, lParam, msg, hwnd) {
+    if !SettingsWindow.Win || hwnd != SettingsWindow.Win.gui.Hwnd
+        return
+    NumPut("int", 460, lParam, 24)
+    NumPut("int", 420, lParam, 28)
 }
 
 ; 闭包捕获这一条原始消息，跑在 SetTimer 起的独立线程里

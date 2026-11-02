@@ -58,15 +58,12 @@ class ListWindow {
            跟得上；而这个回调本身就在窗口过程里，正好赶在重画之前。 */
         g.OnEvent("Size", ListOnSize)
 
-        ; 工作区可能是 0（远程/无显示器），Min 之后会变成负数，Gui.Show 直接抛错，
-        ; 所以这里既要有上限也要有下限
-        wa := Win.WorkArea()
-        w := Max(360, Min(520, wa.w - 60))
-        h := Max(420, Min(560, wa.h - 80))
-        x := Max(0, wa.r - w - 40)
-        y := Max(0, wa.t + 80)
-        g.Show("w" w " h" h " x" x " y" y)
+        ; 上次的大小/位置（没有或不对劲就用 DefaultGeo）
+        geo := ListWindow.LoadGeo()
+        g.Show("w" geo.w " h" geo.h " x" geo.x " y" geo.y)
         Win.RoundCorners(g.Hwnd, true)
+        ; 尺寸下限：不设的话能一路拖成一条缝，里面就全挤扁了
+        OnMessage(0x0024, ListMinSize)
 
         try {
             wvc := WebView2.CreateControllerAsync(g.Hwnd, 0, ctx.dataDir, "", ctx.dllPath).await()
@@ -116,6 +113,46 @@ class ListWindow {
         if (minMax = -1)
             return
         ListWindow.Refill()
+        /* 顺手把新尺寸记下来。不等关闭才存：程序被强杀（或从任务管理器结束）
+           那一笔就丢了。SetTimer 每来一次会重置，天然是 400ms 防抖。 */
+        SetTimer(ListSaveGeoSoon, -400)
+    }
+
+    /* 默认落点：主屏右侧、工作区里。工作区可能是 0（远程/无显示器），
+       Min 之后会变成负数，Gui.Show 直接抛错，所以既要有上限也要有下限。 */
+    static DefaultGeo() {
+        wa := Win.WorkArea()
+        w := Max(360, Min(520, wa.w - 60))
+        h := Max(420, Min(560, wa.h - 80))
+        x := Max(0, wa.r - w - 40)
+        y := Max(0, wa.t + 80)
+        return { x: x, y: y, w: w, h: h }
+    }
+
+    /* 上次的尺寸/位置，存成 "x,y,w,h" 一行（跟便签几何一个格式）。
+       读出来还要过一遍 Win.Clamp：上次可能是在另一块屏、或更大的分辨率上拖的，
+       直接照搬会开到看不见的地方去。 */
+    static LoadGeo() {
+        d := ListWindow.DefaultGeo()
+        s := App.Cfg("window", "listGeo", "")
+        if (s = "")
+            return d
+        p := StrSplit(s, ",")
+        if (p.Length != 4)
+            return d
+        if !(IsNumber(p[1]) && IsNumber(p[2]) && IsNumber(p[3]) && IsNumber(p[4]))
+            return d
+        return Win.Clamp(p[1] + 0, p[2] + 0, Max(p[3] + 0, 380), Max(p[4] + 0, 300))
+    }
+
+    static SaveGeo() {
+        if !ListWindow.Win
+            return
+        r := Win.Rect(ListWindow.Win.gui.Hwnd)
+        c := Win.ClientSize(ListWindow.Win.gui.Hwnd)   ; 存客户区，见 Win.ClientSize 的注释
+        if (c.w < 200 || c.h < 150)     ; 还没摆好的脏值（0 或极小）不记
+            return
+        try App.SetCfg("window", "listGeo", r.x "," r.y "," c.w "," c.h)
     }
 
     /* 切换列表窗口的置顶。窗口不在也照样记下偏好（下次打开就是置顶的），
@@ -144,6 +181,7 @@ class ListWindow {
     static Close() {
         if !ListWindow.Win
             return
+        ListWindow.SaveGeo()            ; 关之前记下这次的尺寸/位置
         try ListWindow.Win.wvc.Close()
         try ListWindow.Win.gui.Destroy()
         ListWindow.Win := 0
@@ -254,6 +292,16 @@ class ListWindow {
             App.Log("钩子 " hook " 出错：" CleanComError(e.Message) " @" e.Line)
     }
 
+    /* 会改数据的钩子调完必须回推一次列表。
+       ★ 页面按钮那条路（✕ 收起 删除）是 Handle 里统一 Push 的，而右键菜单是
+       直接调 Call —— 第一版菜单忘了补这一步，现象就是"右键删除后，那一行还
+       赖在列表里，手快再点它一下就报『便签已经被删除』"。新建/改名/置顶/换色/
+       收起 是同一个毛病，所以统一走这里，别再各写各的。 */
+    static CallThenPush(hook, args*) {
+        ListWindow.Call(hook, args*)
+        ListWindow.Push(ListWindow.Query)
+    }
+
     /* 同 note-window：菜单回调会被传 3 个参数，回调声明得少会抛
        "Too many parameters"，所以统一套一层变参箭头。 */
     static Cb(fn) {
@@ -359,9 +407,21 @@ class ListWindow {
 ; ---- 顶层包装（COM 事件 / SetTimer 用） ----------------------------------
 ListOnMessage(sender, args) => ListWindow.OnMessage(sender, args)
 ListRefill() => ListWindow.Refill()
+; 尺寸变了的 400ms 防抖保存（每来一次 Size 都会重置这个定时器）
+ListSaveGeoSoon() => ListWindow.SaveGeo()
 ; Gui 的 Size 事件回调带三个参数（GuiObj, MinMax, Width, Height），
 ; 参数个数写少一个都会抛 "Too many parameters"
 ListOnSize(g, minMax, w, h) => ListWindow.OnSize(minMax)
+
+/* WM_GETMINMAXINFO(0x0024)：窗口能拖到多小。
+   lParam 指向 MINMAXINFO，ptMinTrackSize 在偏移 24(x) / 28(y)。
+   不设下限时能把窗口一路拖成一条缝，里头就全挤扁了。 */
+ListMinSize(wParam, lParam, msg, hwnd) {
+    if !ListWindow.Win || hwnd != ListWindow.Win.gui.Hwnd
+        return
+    NumPut("int", 380, lParam, 24)
+    NumPut("int", 300, lParam, 28)
+}
 
 ; ---- 菜单回调 ------------------------------------------------------------
 ; 每个函数返回一个"零参闭包"，由 ListWindow.Cb 再包一层变参箭头。
@@ -380,27 +440,27 @@ ListMenuExport(id, fmt) {
 }
 
 ListMenuRename(id) {
-    return () => ListWindow.Call("onRename", id)
+    return () => ListWindow.CallThenPush("onRename", id)
 }
 
 ListMenuPin(id, on) {
-    return () => ListWindow.Call("onPin", id, on)
+    return () => ListWindow.CallThenPush("onPin", id, on)
 }
 
 ListMenuColor(id, name) {
-    return () => ListWindow.Call("onColor", id, name)
+    return () => ListWindow.CallThenPush("onColor", id, name)
 }
 
 ListMenuHide(id) {
-    return () => ListWindow.Call("onHide", id)
+    return () => ListWindow.CallThenPush("onHide", id)
 }
 
 ListMenuDelete(id) {
-    return () => ListWindow.Call("onDelete", id)
+    return () => ListWindow.CallThenPush("onDelete", id)
 }
 
 ListMenuNew() {
-    return () => ListWindow.Call("onNew")
+    return () => ListWindow.CallThenPush("onNew")
 }
 
 ListMenuRefresh() {
@@ -408,11 +468,11 @@ ListMenuRefresh() {
 }
 
 ListMenuShowAll() {
-    return () => ListWindow.Call("onShowAll")
+    return () => ListWindow.CallThenPush("onShowAll")
 }
 
 ListMenuHideAll() {
-    return () => ListWindow.Call("onHideAll")
+    return () => ListWindow.CallThenPush("onHideAll")
 }
 
 ListMenuDataDir() {

@@ -165,4 +165,16 @@ class Win {
         }
         return { x: 0, y: 0, w: 0, h: 0 }
     }
+
+    /* 客户区尺寸。★ 存窗口几何时要用这一份：Gui.Show 的 w/h 说的是客户区，
+       而 WinGetPos 给的是**外框**。拿外框存、拿外框开，每开一次就长一圈边框
+       （这台机器上是 14px，自己测出来的）—— 自检的"尺寸记忆"当场抓到过。 */
+    static ClientSize(hwnd) {
+        try {
+            rc := Buffer(16, 0)
+            if DllCall("user32\GetClientRect", "ptr", hwnd, "ptr", rc)
+                return { w: NumGet(rc, 8, "int"), h: NumGet(rc, 12, "int") }
+        }
+        return { w: 0, h: 0 }
+    }
 }
