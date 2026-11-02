@@ -184,6 +184,19 @@ button.primary:active { filter: brightness(.94); }
   line-height: 16px;
 }
 
+/* 快捷键角标：等宽一点、描边而不是填充，和"已收起"区分开 ——
+   它标的是"这张便签能用快捷键叫出来"，是好事，不是状态提示 */
+.hk {
+  flex: 0 0 auto;
+  margin-right: 2px;
+  padding: 0 5px;
+  border: 1px solid rgba(0, 0, 0, .14);
+  border-radius: 4px;
+  color: var(--fg-dim);
+  font: 10.5px/16px "Cascadia Mono", Consolas, "Courier New", monospace;
+  white-space: nowrap;
+}
+
 .excerpt {
   margin-top: 1px;
   color: var(--fg-dim);

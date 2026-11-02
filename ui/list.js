@@ -94,6 +94,15 @@
       b.textContent = '已收起';
       row1.appendChild(b);
     }
+    /* 快捷键角标：一眼看出哪张便签有"一键呼出"。宿主已经把 ^!1 翻成
+       Ctrl+Alt+1 再发过来，这里不做第二份格式化。 */
+    if (n.hk) {
+      const hk = document.createElement('span');
+      hk.className = 'hk';
+      hk.textContent = n.hk;
+      hk.title = '全局快捷键：' + n.hk + '（按一下呼出，再按收起）';
+      row1.appendChild(hk);
+    }
     main.appendChild(row1);
 
     const ex = document.createElement('div');

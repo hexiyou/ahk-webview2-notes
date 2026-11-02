@@ -40,6 +40,7 @@ class App {
     static QueueIdx := 0
     static InstanceLock := 0
     static Bound := 0          ; Map: 热键名 -> 当前真正注册成功的键串
+    static NoteKeys := 0       ; Map: 便签 id -> 当前真正注册成功的快捷键
     static PendingText := ""   ; 命令行 --new "文字" 带进来的初始内容
     ; 字号范围：太小看不清，太大一张便签里放不下几个字
     static FONT_MIN := 10
@@ -168,6 +169,10 @@ class App {
             SetTimer(SelfTestDialog, -2500)
         if App.HasArg("--selftest-del")
             SetTimer(SelfTestDelete, -2500)
+        if App.HasArg("--selftest-opacity")
+            SetTimer(SelfTestOpacity, -2500)
+        if App.HasArg("--selftest-hotkey")
+            SetTimer(SelfTestHotkey, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -346,6 +351,8 @@ class App {
             "onExport", NoteExport,
             "onPin", NotePin,
             "onColor", NoteColor,
+            "onOpacity", NoteSetOpacity,
+            "onHotkey", NoteAskHotkey,
             "onShowAll", NoteShowAll,
             "onHideAll", NoteHideAll,
             "onDataDir", NoteDataDir,
@@ -360,6 +367,7 @@ class App {
         if NoteWindow.All.Has(id)
             NoteWindow.All[id].Destroy()
         App.Store.Delete(id)
+        App.RebindNoteHotkeys()        ; 便签没了，它的快捷键也得跟着注销
         App.RefreshTray()
     }
 
@@ -503,6 +511,15 @@ class App {
                 App.RebindHotkeys(App.CfgHotkeys())
                 return "「" App.HotkeyLabel(name) "」" e
             }
+            /* 便签自己的快捷键也占着这个键。AHK 不会报冲突，是直接顶掉，
+               所以必须在这里拦 —— 否则"设置面板保存成功，某张便签的键却没了"。 */
+            for n in App.Store.All() {
+                if (n.hotkey != "" && App.SameHotkey(n.hotkey, key)) {
+                    App.RebindHotkeys(App.CfgHotkeys())
+                    return "「" App.HotkeyLabel(name) "」已经给了便签「"
+                        . (n.title = "" ? "（无标题）" : n.title) "」，换一个吧。"
+                }
+            }
         }
 
         App.SetCfg("hotkey", "new", hs["new"])
@@ -642,6 +659,7 @@ class App {
     static BindHotkeys() {
         App.RebindHotkeys(App.CfgHotkeys())
         App.BindListKeys()
+        App.RebindNoteHotkeys()
     }
 
     ; 配置里的三个热键原样读出来（设置面板保存失败时用它把状态恢复回去）
@@ -739,6 +757,193 @@ class App {
             App.Log("热键 " key " 注册失败：" CleanComError(e.Message))
             return 0
         }
+    }
+
+    ; ========================================================================
+    ;  每张便签自己的快捷键
+    ; ========================================================================
+
+    /* 便签的快捷键存在 notes.hotkey 里（空 = 没设），最多 10 张。
+       和上面三个全局键互不干扰，但必须**互斥**：AHK 的 Hotkey() 拿同一个键
+       再注册一次不会报错，是直接把前一个顶掉 —— 冲突只能自己比。 */
+
+    static NoteHotkeyLimit := 10
+
+    static RebindNoteHotkeys() {
+        if !IsObject(App.NoteKeys)
+            App.NoteKeys := Map()
+        ; 先全部注销：不注销就重绑，旧键会留在 AHK 的注册表里（顶着旧闭包）
+        for id, key in App.NoteKeys.Clone() {
+            if (key = "")
+                continue
+            try Hotkey(key, "Off")
+        }
+        App.NoteKeys := Map()
+        if !App.Store
+            return
+        n := 0
+        for note in App.Store.All() {
+            if (note.hotkey = "")
+                continue
+            if App.BindOne(note.hotkey, NoteSummonBound(note.id)) {
+                App.NoteKeys[note.id] := note.hotkey
+                n += 1
+            } else
+                App.Log("便签快捷键注册失败：id=" note.id " = " note.hotkey)
+        }
+        if (n > 0)
+            App.Log("便签快捷键已注册 " n " 个")
+    }
+
+    /* 按快捷键召出这张便签：没开就开，开着但不在最前就提到最前，
+       已经在最前就收起 —— 一个键既呼出又收回，不用记两个动作。
+       建窗要 await WebView2，热键线程里绝不能直接建，一律转独立线程。 */
+    static SummonNote(id) {
+        SetTimer(NoteSummonTick.Bind(id), -10)
+    }
+
+    /* 真正干活的那一半（已经在独立线程里）。先 Show 再 ToFront：窗口可能
+       被"收起"过，只是提到最前看不见东西。 */
+    static SummonNoteNow(id) {
+        if NoteWindow.All.Has(id) {
+            w := NoteWindow.All[id]
+            if WinActive("ahk_id " w.gui.Hwnd) {
+                w.Hide()
+                return
+            }
+            w.Show()
+            w.ToFront()
+            return
+        }
+        App.OpenNote(id)
+    }
+
+    /* 换成分层窗口只能重建。Destroy 会把几何写回库，重建时照原样摆回去；
+       已收起的便签不会走到这里（没有窗口），下次开的时候自然就是分层的。 */
+    static RebuildNote(id) {
+        if !NoteWindow.All.Has(id)
+            return
+        NoteWindow.All[id].Destroy()
+        n := App.Store.Get(id)
+        if n
+            NoteWindow(n)
+    }
+
+    static AskNoteHotkey(id) {
+        n := App.Store.Get(id)
+        if !n {
+            App.Toast("这张便签已经不在了")
+            return
+        }
+        ; 和重命名框一样：置顶的便签/列表会盖住普通对话框，那就一起置顶
+        top := 0
+        if NoteWindow.All.Has(id) && NoteWindow.All[id].note.pinned
+            top := 1
+        if ListWindow.IsOpen() && ListWindow.Topmost
+            top := 1
+        prompt := "设一个全局快捷键，随时把这张便签呼到最前（已在最前时再按收起）。`n"
+            . "写法：^ = Ctrl，! = Alt，+ = Shift，# = Win，例如 ^!1、#n。`n"
+            . "留空 = 取消这张便签的快捷键；最多 " App.NoteHotkeyLimit " 张便签可以设。"
+        r := App.AskText("便签快捷键", prompt, n.hotkey, top)
+        if !r.ok
+            return
+        e := App.SetNoteHotkey(id, r.value)
+        if (e != "")
+            MsgBox(e, "便签快捷键", "Icon!")
+    }
+
+    ; 返回错误文案，空串 = 成功
+    static SetNoteHotkey(id, key) {
+        key := Trim(key)
+        if (key = "") {
+            App.Store.SetHotkey(id, "")
+            App.RebindNoteHotkeys()
+            App.RefreshWindowHotkey(id, "")
+            App.RefreshList()
+            return ""
+        }
+
+        for name, k in App.CfgHotkeys() {
+            if (k != "" && App.SameHotkey(k, key))
+                return "这个键已经是「" App.HotkeyLabel(name) "」了，换一个吧。"
+        }
+
+        taken := 0, others := 0
+        for n in App.Store.All() {
+            if (n.hotkey = "" || n.id = id)
+                continue
+            others += 1
+            if App.SameHotkey(n.hotkey, key)
+                taken := n
+        }
+        if taken
+            return "这个键已经给了便签「" (taken.title = "" ? "（无标题）" : taken.title) "」，换一个吧。"
+        if (others >= App.NoteHotkeyLimit)
+            return "已经有 " App.NoteHotkeyLimit " 张便签设了快捷键，先给别的便签清掉一个再用。"
+
+        e := App.TestHotkey(key)
+        if (e != "")
+            return e
+
+        App.Store.SetHotkey(id, key)
+        App.RebindNoteHotkeys()
+        App.RefreshWindowHotkey(id, key)
+        App.RefreshList()
+        App.Log("便签快捷键：id=" id " = " key)
+        return ""
+    }
+
+    ; 已经开着的窗口里存着一份 note 副本，菜单标签要跟着变
+    static RefreshWindowHotkey(id, key) {
+        if NoteWindow.All.Has(id)
+            NoteWindow.All[id].note.hotkey := key
+    }
+
+    /* 只给列表页显示用：^!1 这种写法对普通用户是天书，列表角标显示 Ctrl+Alt+1。
+       实现在 NoteWindow 里（窗口层自己就要用，见那边的说明）。 */
+    static HotkeyPretty(k) => NoteWindow.HotkeyPretty(k)
+
+    static SameHotkey(a, b) => (App.NormHotkey(a) = App.NormHotkey(b))
+
+    /* 归一化：修饰符拆出来按固定顺序排，主键统一小写。
+       "^!A" 与 "!^a" 在 AHK 眼里是同一个键（重复注册会顶掉），必须能认出来。 */
+    static NormHotkey(k) {
+        k := Trim(k)
+        mods := ""
+        while (StrLen(k) > 0 && InStr("#!^+", SubStr(k, 1, 1))) {
+            ch := SubStr(k, 1, 1)
+            if !InStr(mods, ch)
+                mods .= ch
+            k := SubStr(k, 2)
+        }
+        sorted := ""
+        for ch in ["#", "!", "^", "+"] {
+            if InStr(mods, ch)
+                sorted .= ch
+        }
+        return sorted . StrLower(Trim(k))
+    }
+
+    ; ========================================================================
+    ;  每张便签自己的透明度
+    ; ========================================================================
+
+    /* pct 30~100。写库 + 应用到已开的窗口。
+       非透明外观下，<100 需要窗口本身是分层的（页面淡下去才有地方透），
+       而分层与否是建窗时定的扩展样式 —— 只能重建这一张。
+       100 回来时不用重建：分层窗口画不透明内容完全正常。 */
+    static SetNoteOpacity(id, pct) {
+        pct := Max(30, Min(100, Integer(pct)))
+        App.Store.SetOpacity(id, pct)
+        if NoteWindow.All.Has(id) {
+            w := NoteWindow.All[id]
+            if (pct < 100 && !w.layered)
+                SetTimer(NoteRebuildTick.Bind(id), -10)
+            else
+                w.ApplyOpacity(pct)
+        }
+        App.RefreshList()
+        App.Log("便签透明度：id=" id " = " pct "%")
     }
 
     ; 透明外观开关：改配置后整体重建窗口（DefaultBackgroundColor 只在建窗口时设得进去）
@@ -1155,6 +1360,159 @@ SelfTestDelete() {
     try App.DeleteNote(ids[3])
     Sleep 300
     App.Log("SELFTEST DEL 结论：" (n1 = n0 - 1 && n2 = n0 - 2 && pin = 1 ? "通过" : "未通过"))
+    SelfTestDone()
+}
+
+/* 自检：每张便签的透明度。
+   两条路分开验：
+     · 透明外观（默认）：窗口本来就是分层的，改透明度 = 改页面 opacity
+     · 不透明外观：100% 时是普通窗口，调到 <100 必须**重建**成分层窗口，
+       否则页面淡下去透出来的是窗口底色，看上去一点没变（最容易漏的就是这条）
+   判据取页面算出来的 opacity，不取库里那个数 —— 库对了但没发到页面，查不出来。 */
+SelfTestOpacity() {
+    oldTr := App.Ctx.appearance.transparent
+    ids := []
+
+    id := App.Store.Create(Map("title", "透明度90", "body_text", "a"))
+    ids.Push(id)
+    App.SetNoteOpacity(id, 90)
+    w := App.OpenNote(id)
+    Sleep 2000
+    got90 := 0
+    if w
+        got90 := App.EvalNum(w, "Math.round(parseFloat(getComputedStyle(document.documentElement).opacity||'1')*100)")
+    App.Log("SELFTEST OPACITY 透明外观 90%：库=" App.Store.Get(id).opacity
+        " 页面=" got90 " 分层=" (w ? w.layered : -1))
+
+    App.SetNoteOpacity(id, 50)
+    Sleep 500
+    got50 := w ? App.EvalNum(w, "Math.round(parseFloat(getComputedStyle(document.documentElement).opacity||'1')*100)") : 0
+    App.Log("SELFTEST OPACITY 改到 50%：库=" App.Store.Get(id).opacity " 页面=" got50)
+
+    App.SetNoteOpacity(id, 100)
+    Sleep 500
+    got100 := w ? App.EvalNum(w, "Math.round(parseFloat(getComputedStyle(document.documentElement).opacity||'1')*100)") : 0
+    App.Log("SELFTEST OPACITY 回到 100%：库=" App.Store.Get(id).opacity " 页面=" got100)
+
+    ; 重建那条路：切成不透明外观，先按 100% 建一张普通窗口
+    App.Ctx.appearance.transparent := 0
+    id2 := App.Store.Create(Map("title", "透明度重建", "body_text", "b"))
+    ids.Push(id2)
+    w2 := App.OpenNote(id2)
+    Sleep 2000
+    beforeLayered := w2 ? w2.layered : -1
+    App.SetNoteOpacity(id2, 70)
+    Sleep 3200                     ; 重建要先关 WebView2 再建一个，慢
+    w3 := NoteWindow.All.Has(id2) ? NoteWindow.All[id2] : 0
+    afterLayered := w3 ? w3.layered : -1
+    got70 := w3 ? App.EvalNum(w3, "Math.round(parseFloat(getComputedStyle(document.documentElement).opacity||'1')*100)") : 0
+    App.Log("SELFTEST OPACITY 不透明外观 100%→70%：分层 " beforeLayered " -> " afterLayered
+        "，页面=" got70 "，库=" App.Store.Get(id2).opacity)
+
+    ; 列表右键那条路：设 70%、再"重置透明度"。这是"透到找不着"时的唯一退路，
+    ; 它必须真的把库和页面都拉回 100%，而不是只改菜单上的勾。
+    App.ShowList()
+    Sleep 2600
+    set70 := 0, reset := 0, resetPage := 0
+    if ListWindow.Win {
+        ListMenuOpacity(id, 70).Call()
+        Sleep 700
+        set70 := App.Store.Get(id).opacity
+        ListMenuOpacity(id, 100).Call()
+        Sleep 700
+        reset := App.Store.Get(id).opacity
+        resetPage := App.EvalNum(w, "Math.round(parseFloat(getComputedStyle(document.documentElement).opacity||'1')*100)")
+    }
+    App.Log("SELFTEST OPACITY 列表菜单：设 70 后库=" set70 "，重置后库=" reset " 页面=" resetPage)
+
+    ok := (got90 = 90 && got50 = 50 && got100 = 100
+        && beforeLayered = 0 && afterLayered = 1 && got70 = 70 && App.Store.Get(id2).opacity = 70
+        && set70 = 70 && reset = 100 && resetPage = 100)
+
+    ; 收摊：外观恢复、测试便签删掉
+    App.Ctx.appearance.transparent := oldTr
+    for i in ids
+        try App.DeleteNote(i)
+    Sleep 300
+    App.Log("SELFTEST OPACITY 结论：" (ok ? "通过" : "未通过"))
+    SelfTestDone()
+}
+
+/* 自检：便签自己的全局快捷键。
+   重点在**冲突拦截** —— AHK 允许同一个键重复注册（后来的顶掉前面的）且不报错，
+   所以"两个便签用同一个键"不会自己暴露。本机 SendInput 会把程序卡死，
+   所以这里不真按键，只验注册表、唤起逻辑和列表角标。 */
+SelfTestHotkey() {
+    ids := []
+    id1 := App.Store.Create(Map("title", "快捷一", "body_text", "a"))
+    id2 := App.Store.Create(Map("title", "快捷二", "body_text", "b"))
+    ids.Push(id1)
+    ids.Push(id2)
+
+    e1 := App.SetNoteHotkey(id1, "^!F9")
+    e2 := App.SetNoteHotkey(id2, "这不是键")
+    e3 := App.SetNoteHotkey(id2, App.Cfg("hotkey", "new", "^!n"))
+    e4 := App.SetNoteHotkey(id2, "!^F9")          ; 同键不同写法：修饰符换序
+    e5 := App.SetNoteHotkey(id2, "^!F10")
+    App.Log("SELFTEST HK 设置=" (e1 = "" ? "ok" : "失败：" e1)
+        " 非法键=" (e2 != "" ? "已拦" : "没拦")
+        " 撞全局键=" (e3 != "" ? "已拦" : "没拦")
+        " 撞别的便签=" (e4 != "" ? "已拦" : "没拦")
+        " 第二个=" (e5 = "" ? "ok" : "失败：" e5))
+    bound := (App.NoteKeys.Has(id1) && App.NoteKeys.Has(id2)) ? 1 : 0
+    App.Log("SELFTEST HK 真注册上=" bound "，库里 id1=" App.Store.Get(id1).hotkey)
+
+    same := App.SameHotkey("^!A", "!^a") ? 1 : 0
+    pretty := NoteWindow.HotkeyPretty("^!1")
+    App.Log("SELFTEST HK 归一化 ^!A/!^a=" same "，美化 ^!1→" pretty)
+
+    ; 唤起：先收起，再"按"一次 —— 得重新出现
+    w := App.OpenNote(id1)
+    Sleep 2000
+    shown := 0, act := 0, tog := -1
+    if w {
+        w.Hide()
+        Sleep 400
+        App.SummonNoteNow(id1)
+        Sleep 700
+        shown := (App.Store.Get(id1).hidden = 0) ? 1 : 0
+        ; 已经在最前时再按 = 收起（拿不到前台就不算失败，纯环境问题）
+        WinActivate("ahk_id " w.gui.Hwnd)
+        Sleep 400
+        act := WinActive("ahk_id " w.gui.Hwnd) ? 1 : 0
+        App.SummonNoteNow(id1)
+        Sleep 500
+        tog := App.Store.Get(id1).hidden
+    }
+    App.Log("SELFTEST HK 收起后按=" shown "（期望 1），前台时按=" tog "（前台=" act "）")
+
+    ; 列表角标：两张有快捷键的便签 → 两个角标
+    App.ShowList()
+    Sleep 2600
+    badges := ListWindow.Win ? App.EvalNum(ListWindow.Win, "document.querySelectorAll('#list .hk').length") : -1
+    App.Log("SELFTEST HK 列表角标=" badges "（期望 2）")
+
+    ; 上限：库里先塞 10 个占位的（不真绑），第 11 个要被挡
+    fakes := []
+    Loop 10 {
+        fid := App.Store.Create(Map("title", "占位" A_Index, "body_text", "x"))
+        App.Store.SetHotkey(fid, "^!F" (A_Index + 12))
+        fakes.Push(fid)
+    }
+    e6 := App.SetNoteHotkey(id2, "^!F11")
+    App.Log("SELFTEST HK 超过上限：" (e6 != "" ? "已拦" : "没拦") "（" e6 "）")
+
+    for i in fakes
+        try App.Store.Delete(i)
+    for i in ids
+        try App.DeleteNote(i)
+    App.RebindNoteHotkeys()
+    Sleep 400
+
+    ok := (e1 = "" && e2 != "" && e3 != "" && e4 != "" && e5 = ""
+        && bound = 1 && same = 1 && pretty = "Ctrl+Alt+1"
+        && shown = 1 && (act ? tog = 1 : 1) && badges = 2 && e6 != "")
+    App.Log("SELFTEST HK 结论：" (ok ? "通过" : "未通过"))
     SelfTestDone()
 }
 
@@ -2642,6 +3000,11 @@ RichStyle(w, cmd, tag, wantMd, label) {
 ; ---- 顶层包装：SetTimer / OnError 传类静态方法引用会踩坑，统一走这里 ----------
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
+; 便签快捷键：热键回调只转一手，真正的"开窗/提到最前"在独立线程里做
+NoteSummonTick(id) => App.SummonNoteNow(id)
+NoteSummonBound(id) => () => App.SummonNote(id)
+; 透明度 <100 又赶上非透明外观：换成分层窗口要重建这一张
+NoteRebuildTick(id) => App.RebuildNote(id)
 ; 命令行 --new "文字"：Boot 完之后再建，别和 BootTick 抢窗口
 NoteCliNew() => App.NewNote(Map("text", App.PendingText))
 NoteShowList() => App.ShowList()
@@ -2671,6 +3034,8 @@ NoteShowSettings() {
 NoteOpenSettings() => App.ShowSettings()
 NotePin(id, on) => App.SetPin(id, on)
 NoteColor(id, color) => App.SetColor(id, color)
+NoteSetOpacity(id, pct) => App.SetNoteOpacity(id, pct)
+NoteAskHotkey(id) => App.AskNoteHotkey(id)
 NoteShowAll() => App.ShowAll()
 NoteHideAll() => App.HideAll()
 NoteDataDir() => App.OpenDataDir()

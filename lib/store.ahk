@@ -18,7 +18,7 @@
 ; ============================================================================
 
 class Store {
-    static SCHEMA_VERSION := 2
+    static SCHEMA_VERSION := 3
 
     db := 0
 
@@ -50,6 +50,8 @@ class Store {
         sql .= " pinned INTEGER NOT NULL DEFAULT 0,"
         sql .= " hidden INTEGER NOT NULL DEFAULT 0,"
         sql .= " title_locked INTEGER NOT NULL DEFAULT 0,"
+        sql .= " opacity INTEGER NOT NULL DEFAULT 100,"
+        sql .= " hotkey TEXT NOT NULL DEFAULT '',"
         sql .= " created_at INTEGER NOT NULL DEFAULT 0,"
         sql .= " updated_at INTEGER NOT NULL DEFAULT 0);"
         sql .= "CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);"
@@ -68,11 +70,20 @@ class Store {
             this._EnsureColumn("notes", "title_locked", "INTEGER NOT NULL DEFAULT 0")
             this.db.Run("UPDATE meta SET v=? WHERE k='schema_version'", "2")
         }
+        /* v2 -> v3：每张便签自己的透明度（30~100）与全局快捷键（空 = 没设）。
+           opacity 存整数百分比而不是 0~255：菜单里就是"80%"，读写不用来回换。 */
+        if (cur < 3) {
+            this._EnsureColumn("notes", "opacity", "INTEGER NOT NULL DEFAULT 100")
+            this._EnsureColumn("notes", "hotkey", "TEXT NOT NULL DEFAULT ''")
+            this.db.Run("UPDATE meta SET v=? WHERE k='schema_version'", "3")
+        }
         /* 版本号只说明"迁移跑过"，不说明"列真在"。踩过一次：上一版把
            title_locked 只加在迁移分支里，忘了写进 CREATE TABLE，结果新建的库
            版本号直接就是 2、迁移永远不跑，读行时 m["title_locked"] 抛
            "Item has no value"。所以这里不看版本，按 PRAGMA 实测补一次。 */
         this._EnsureColumn("notes", "title_locked", "INTEGER NOT NULL DEFAULT 0")
+        this._EnsureColumn("notes", "opacity", "INTEGER NOT NULL DEFAULT 100")
+        this._EnsureColumn("notes", "hotkey", "TEXT NOT NULL DEFAULT ''")
     }
 
     /* 列存在就跳过，不存在就 ALTER。注意 SQLite 的 ALTER TABLE ADD COLUMN
@@ -220,6 +231,18 @@ class Store {
         this.db.Run("UPDATE notes SET color=? WHERE id=?", color, id)
     }
 
+    /* 透明度：整数百分比，30~100。夹一下再写 —— 菜单点不到 0，
+       但 IPC / 手改库都可能传进来离谱的值，写进库里就再也恢复不了。 */
+    SetOpacity(id, pct) {
+        pct := Max(30, Min(100, Integer(pct)))
+        this.db.Run("UPDATE notes SET opacity=? WHERE id=?", pct, id)
+    }
+
+    ; 快捷键：空串表示取消。合法性/冲突由 App 那层管，这里只落库
+    SetHotkey(id, key) {
+        this.db.Run("UPDATE notes SET hotkey=? WHERE id=?", key, id)
+    }
+
     ; 把某条提到最前（打开/编辑时用，让顺序符合"最近用过"）
     Touch(id) {
         this.db.Run("UPDATE notes SET updated_at=? WHERE id=?", Store.Now(), id)
@@ -251,6 +274,9 @@ class Store {
             pinned: m["pinned"] ? 1 : 0,
             hidden: m["hidden"] ? 1 : 0,
             title_locked: (m.Has("title_locked") && m["title_locked"]) ? 1 : 0,
+            ; 老库（v3 之前）没有这两列；Has 兜一下，否则升级瞬间整个列表读不出来
+            opacity: (m.Has("opacity") && m["opacity"]) ? m["opacity"] : 100,
+            hotkey: m.Has("hotkey") ? m["hotkey"] : "",
             created_at: m["created_at"],
             updated_at: m["updated_at"]
         }

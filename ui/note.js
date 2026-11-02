@@ -28,6 +28,7 @@
     mode: 'rich',
     color: 'yellow',
     pinned: 0,
+    opacity: 100,          // 30~100，整张便签的不透明度（宿主菜单里调）
     ready: false,
     dirty: false,
     maxed: false,          // 窗口被双击标题栏放大了（拖动/拉手柄这时要停手）
@@ -50,6 +51,7 @@
         case 'init': onInit(msg); break;
         case 'color': applyColor(msg.color); break;
         case 'pin': setPinned(msg.on); break;
+        case 'opacity': applyOpacity(msg.pct); break;
         case 'toggle-md': setMode(state.mode === 'md' ? 'rich' : 'md'); break;
         case 'copy-all': copyAll(); break;
         case 'font': applyFontSize(msg.size); break;
@@ -78,6 +80,7 @@
     if (state.app.fontSize) applyFontSize(state.app.fontSize);
     applyColor(n.color);
     setPinned(n.pinned);
+    applyOpacity(n.opacity);
 
     if (state.mode === 'md') {
       source.value = n.md || '';
@@ -317,6 +320,16 @@
   function applyColor(name) {
     state.color = name || 'yellow';
     document.body.dataset.color = state.color;
+  }
+
+  /* 整张便签的不透明度。挂在 <html> 上而不是 .note：连 body 的兜底底色
+     一起淡掉，分层窗口下才真的能透出桌面（只淡 .note 的话，不透明外观那条
+     路——body 铺着便签色——看起来一点没变）。100% 时把样式清掉，
+     不留 opacity:1 这种多余的合成层。 */
+  function applyOpacity(pct) {
+    const n = Math.max(30, Math.min(100, parseInt(pct, 10) || 100));
+    state.opacity = n;
+    document.documentElement.style.opacity = n >= 100 ? '' : String(n / 100);
   }
 
   /* ---- 选区浮动工具条 --------------------------------------------------- */

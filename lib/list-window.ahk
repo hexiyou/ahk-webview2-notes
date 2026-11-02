@@ -321,6 +321,8 @@ class ListWindow {
             m := Menu()
             m.Add("打开", ListWindow.Cb(ListMenuOpen(id)))
             m.Add("重命名…", ListWindow.Cb(ListMenuRename(id)))
+            m.Add(n.hotkey ? "快捷键…（" NoteWindow.HotkeyPretty(n.hotkey) "）" : "设置快捷键…"
+                , ListWindow.Cb(ListMenuHotkey(id)))
             m.Add()
             m.Add(n.pinned ? "取消置顶" : "置顶", ListWindow.Cb(ListMenuPin(id, n.pinned ? 0 : 1)))
             sub := Menu()
@@ -333,6 +335,23 @@ class ListWindow {
                     sub.Check(NoteWindow.ColorLabel(cname))
             }
             m.Add("颜色", sub)
+
+            /* 透明度：第一项固定是"重置"。设得太透、便签看着像没了的时候，
+               得有一个不用先找到那张便签就能点回来的入口 —— 所以它必须在
+               列表里（便签本身这时可能已经"找不到"了）。 */
+            am := Menu()
+            am.Add("重置透明度（100%）", ListWindow.Cb(ListMenuOpacity(id, 100)))
+            if (n.opacity >= 100)
+                am.Check("重置透明度（100%）")
+            am.Add()
+            for pct in NoteWindow.OpacityLevels() {
+                if (pct = 100)
+                    continue
+                am.Add(pct "%", ListWindow.Cb(ListMenuOpacity(id, pct)))
+                if (pct = n.opacity)
+                    am.Check(pct "%")
+            }
+            m.Add("透明度", am)
 
             ; 导出：和便签右键菜单里的那一套完全一样，只是入口不同
             em := Menu()
@@ -390,6 +409,9 @@ class ListWindow {
             json .= ',"color":' JsonQuote(n.color)
             json .= ',"pinned":' n.pinned
             json .= ',"hidden":' n.hidden
+            json .= ',"opacity":' n.opacity
+            ; 角标显示人话（Ctrl+Alt+1），库里存的还是 ^!1
+            json .= ',"hk":' JsonQuote(n.hotkey = "" ? "" : NoteWindow.HotkeyPretty(n.hotkey))
             json .= ',"updated":' n.updated_at
             json .= "}"
         }
@@ -449,6 +471,14 @@ ListMenuPin(id, on) {
 
 ListMenuColor(id, name) {
     return () => ListWindow.CallThenPush("onColor", id, name)
+}
+
+ListMenuOpacity(id, pct) {
+    return () => ListWindow.CallThenPush("onOpacity", id, pct)
+}
+
+ListMenuHotkey(id) {
+    return () => ListWindow.CallThenPush("onHotkey", id)
 }
 
 ListMenuHide(id) {

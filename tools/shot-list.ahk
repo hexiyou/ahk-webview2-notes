@@ -54,7 +54,9 @@ st := Store(dataDir "\_shotlist.db")
 st.Create(Map("title", "买菜清单", "body_text", "鸡蛋 牛奶 面包", "color", "yellow"))
 st.Create(Map("title", "工作周报", "body_text", "本周完成了搜索功能，顺手修了三个 bug"
     , "color", "blue", "pinned", 1))
-st.Create(Map("title", "想法碎片", "body_text", "给便签加个语法着色？", "color", "purple"))
+hkId := st.Create(Map("title", "想法碎片", "body_text", "给便签加个语法着色？", "color", "purple"))
+; 给一条设个快捷键：列表角标（Ctrl+Alt+1）也要出现在文档截图里
+st.SetHotkey(hkId, "^!1")
 st.Create(Map("title", "后台维护", "body_text", "每月清理一次图片缓存", "color", "gray", "hidden", 1))
 
 ListWindow.Store := st

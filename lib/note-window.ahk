@@ -41,6 +41,10 @@ class NoteWindow {
     menuZone := "note"
     menuInPre := 0
     menuLang := ""
+    /* 这张窗口到底是不是分层窗口（WS_EX_LAYERED）。opacity < 100 时必须分层，
+       否则页面透明度没地方透 —— 普通窗口底下是窗口底色，透出来是那块颜色，
+       不是桌面。见 App.SetNoteOpacity 里的重建分支。 */
+    layered := false
 
     __New(note) {
         this.id := note.id
@@ -49,8 +53,11 @@ class NoteWindow {
         appr := ctx.appearance
 
         geo := Win.Clamp(note.x, note.y, note.w, note.h)
+        /* 透明外观 or 这张便签设了半透明 → 走分层窗口：窗口背景 alpha=0，
+           画面完全由页面画（卡片自带 rgba 圆角）。两者只能建窗时决定。 */
+        this.layered := (appr.transparent || (note.opacity < 100)) ? true : false
         flags := "-Caption +ToolWindow"
-        if (appr.transparent)
+        if this.layered
             flags .= " +E0x00080000 +E0x00200000"     ; LAYERED | NOREDIRECTIONBITMAP
         if (note.pinned)
             flags .= " +AlwaysOnTop"
@@ -58,7 +65,7 @@ class NoteWindow {
         g := Gui(flags, "便签 " note.id)
         g.MarginX := 0
         g.MarginY := 0
-        g.BackColor := appr.transparent ? "0x000000" : NoteWindow.ColorHex(note.color)
+        g.BackColor := this.layered ? "0x000000" : NoteWindow.ColorHex(note.color)
         g.OnEvent("Close", ObjBindMethod(this, "Destroy"))
         this.gui := g
 
@@ -69,10 +76,10 @@ class NoteWindow {
         ; ★ 分层窗口必须在窗口存在之后补 alpha=255，否则整窗 alpha=0，
         ;   鼠标消息会直接穿透到下面的窗口（表现：看得见、点不到）。
         ;   详见 lib\win.ahk 的 MakeTransparent 注释。
-        if (appr.transparent)
+        if this.layered
             Win.SetAlpha(g.Hwnd, 255)
 
-        if (!appr.transparent)
+        if !this.layered
             Win.RoundCorners(g.Hwnd, true)
 
         try {
@@ -84,9 +91,9 @@ class NoteWindow {
         }
         this.wv := this.wvc.CoreWebView2
 
-        ; 背景色：透明模式必须 0；不透明模式给便签底色，免得加载瞬间闪白
+        ; 背景色：分层窗口必须给全透明（0）；普通窗口给便签底色，免得加载瞬间闪白
         try {
-            this.wvc.DefaultBackgroundColor := appr.transparent ? 0x00000000
+            this.wvc.DefaultBackgroundColor := this.layered ? 0x00000000
                 : 0xFF000000 | NoteWindow.ColorBGR(note.color)
         }
         try {
@@ -248,6 +255,7 @@ class NoteWindow {
     CloseSelf() {
         this.Destroy()
         NoteWindow.Store.Delete(this.id)
+        App.RebindNoteHotkeys()     ; 删掉的便签不能留下一个按了没反应的键
         App.RefreshTray()
     }
 
@@ -264,6 +272,7 @@ class NoteWindow {
         json .= ',"mode":' JsonQuote(n.mode)
         json .= ',"color":' JsonQuote(n.color)
         json .= ',"pinned":' n.pinned
+        json .= ',"opacity":' n.opacity
         json .= '}'
         json .= ',"app":{'
         json .= '"transparent":' (appr.transparent ? "true" : "false")
@@ -320,9 +329,48 @@ class NoteWindow {
         if !NoteWindow.IsColor(color)
             return
         this.note.color := color
-        if !NoteWindow.Ctx.appearance.transparent
+        ; 分层窗口的窗口底色必须是黑的（alpha=0 才有透明），改它等于给卡片
+        ; 垫一层实色 —— 半透明的便签会立刻变成不透明。只有普通窗口才跟着换底色。
+        if !this.layered
             this.gui.BackColor := NoteWindow.ColorHex(color)
         this.Send('{"type":"color","color":' JsonQuote(color) '}')
+    }
+
+    /* 只改外观不写库（写库在 App.SetNoteOpacity 里，它还要负责"要不要重建"）。
+       透明度是靠页面整体 opacity 做的：窗口是分层窗口，页面淡下去就透出桌面。
+       注意别用 SetLayeredWindowAttributes 的 alpha —— 那个只影响命中测试，
+       画面在 WebView2 自己的合成树里，改它没有视觉效果（lib\win.ahk 有记录）。 */
+    ApplyOpacity(pct) {
+        pct := Max(30, Min(100, Integer(pct)))
+        this.note.opacity := pct
+        this.Send('{"type":"opacity","pct":' pct '}')
+    }
+
+    ; 菜单入口。写库 + 该重建就重建，统一交给 App 收口，别在这里各写一份
+    SetOpacity(pct) => App.SetNoteOpacity(this.id, pct)
+
+    ; 菜单入口：弹输入框改全局快捷键（空 = 取消）。校验/落库/重绑都在 App 里
+    AskHotkey() {
+        App.AskNoteHotkey(this.id)
+    }
+
+    /* 透明度档位。30% 是下限：再低就只剩一层影子，误点了都找不回来
+       （列表右键的"重置透明度"就是给这个兜底的）。 */
+    static OpacityLevels() {
+        return [100, 90, 80, 70, 60, 50, 40, 30]
+    }
+
+    /* 把 ^!1 说成人话 Ctrl+Alt+1。放在这里而不是 App 里：列表窗口和便签窗口
+       都要用，而 probe-list 这类测试只加载窗口层、不带 App。 */
+    static HotkeyPretty(k) {
+        k := Trim(k)
+        out := ""
+        while (StrLen(k) > 0 && InStr("#!^+", SubStr(k, 1, 1))) {
+            ch := SubStr(k, 1, 1)
+            out .= (ch = "#") ? "Win+" : (ch = "!") ? "Alt+" : (ch = "^") ? "Ctrl+" : "Shift+"
+            k := SubStr(k, 2)
+        }
+        return out . k
     }
 
     ; ---- 显隐 ---------------------------------------------------------------
@@ -512,6 +560,8 @@ class NoteWindow {
         m.Add("新建便签", (*) => NoteDeferNew())
         m.Add("便签列表…", (*) => NoteDeferList())
         m.Add("重命名…", NoteWindow.MB(ObjBindMethod(this, "Rename")))
+        m.Add(this.note.hotkey ? "快捷键…（" NoteWindow.HotkeyPretty(this.note.hotkey) "）"
+            : "设置快捷键…", NoteWindow.MB(ObjBindMethod(this, "AskHotkey")))
         m.Add()
         /* 大段文字/图片的集中输入：先摊开整块屏，省得一边写一边拖窗口。
            双击标题栏是同一个动作，菜单里也留一份（不用记双击这件事）。 */
@@ -530,6 +580,18 @@ class NoteWindow {
                 sub.Check(NoteWindow.ColorLabel(name))
         }
         m.Add("颜色", sub)
+
+        /* 透明度：给档位而不是滑杆。档位够用，也不用为"拖滑杆时每一格都要
+           重建窗口"再想一套节流；而且 <100 在非透明外观下要换成分层窗口，
+           那是一次重建（见 App.SetNoteOpacity）。 */
+        am := Menu()
+        for pct in NoteWindow.OpacityLevels() {
+            label := (pct = 100) ? "100%（不透明）" : pct "%"
+            am.Add(label, NoteWindow.MB(ObjBindMethod(this, "SetOpacity", pct)))
+            if (pct = this.note.opacity)
+                am.Check(label)
+        }
+        m.Add("透明度", am)
         m.Add()
         m.Add(isMd ? "切换到富文本编辑" : "切换 Markdown 源码"
             , NoteWindow.MB(ObjBindMethod(this, "SendType", "toggle-md")))
