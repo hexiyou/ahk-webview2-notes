@@ -486,6 +486,47 @@ for act in ["pin", "hide", "color", "opacity", "export", "clear-hotkey", "delete
     Check("批量按钮 data-act=" act, InStr(listHtml, "data-act=`"" act "`"") > 0)
 Check("宿主认 filter-clear", InStr(srcList, 'case "filter-clear"') > 0)
 
+/* ---- PDF / Word 导出 ---------------------------------------------------
+   这两条路都不在 export.ahk 里（一个要建隐藏窗口，一个要起子进程），
+   所以只能靠源码文本 + 类方法查"两端接上了没有"。 */
+srcPdf := FileRead(A_ScriptDir "\..\lib\pdf.ahk", "UTF-8")
+srcWord := FileRead(A_ScriptDir "\..\lib\word.ahk", "UTF-8")
+Check("Pdf 有 Save / SaveMany / Start", InStr(srcPdf, "static Save(") > 0
+    && InStr(srcPdf, "static SaveMany(") > 0 && InStr(srcPdf, "static Start(") > 0)
+Check("Pdf 用 PrintToPdfAsync", InStr(srcPdf, "PrintToPdfAsync(") > 0)
+Check("Pdf 设了 A4 与 1.5cm 边距", InStr(srcPdf, "PAGE_W") > 0 && InStr(srcPdf, "MARGIN") > 0)
+Check("Pdf 打开背景打印（不然代码块没底色）", InStr(srcPdf, "ShouldPrintBackgrounds := 1") > 0)
+Check("Pdf 不在 COM 回调里 await（靠定时器退出）"
+    , InStr(srcPdf, 'SetTimer(Pdf.Fn("DoPrint")') > 0)
+Check("Word 有 Save / SaveMany / ExportManifest", InStr(srcWord, "static Save(") > 0
+    && InStr(srcWord, "static SaveMany(") > 0 && InStr(srcWord, "static ExportManifest(") > 0)
+Check("Word 修外链图片（BreakLink）", InStr(srcWord, "BreakLink()") > 0)
+Check("Word 补代码块底纹", InStr(srcWord, "BackgroundPatternColor") > 0)
+Check("Word 有环境判断（没装 Office 会明说）", InStr(srcWord, "static Available()") > 0)
+Check("Word 起子进程用输出参数取 PID", InStr(srcWord, "&pid") > 0)
+
+; 入口接线：App 得认 pdf / docx 两种格式
+srcApp := FileRead(A_ScriptDir "\..\note.ahk", "UTF-8")
+Check("App.ExportNote 分派 pdf", InStr(srcApp, 'case "pdf": Pdf.Save(n)') > 0)
+Check("App.ExportNote 分派 docx", InStr(srcApp, 'case "docx": Word.Save(n)') > 0)
+Check("App.ExportMany 分派 pdf", InStr(srcApp, 'case "pdf": Pdf.SaveMany(notes)') > 0)
+Check("子进程入口在单实例锁之前", InStr(srcApp, 'App.HasArg("--word-export")') > 0
+    && InStr(srcApp, '--word-export') < InStr(srcApp, 'CreateMutexW'))
+
+; 两套导出菜单都得有 PDF / Word
+Check("便签导出菜单有 PDF", InStr(srcWin, "PDF 文档 (*.pdf)") > 0)
+Check("便签导出菜单有 Word", InStr(srcWin, "Word 文档 (*.docx)") > 0)
+Check("列表单张导出有 PDF", InStr(srcList, 'ListMenuExport(id, "pdf")') > 0)
+Check("列表批量导出有 Word", InStr(srcList, 'ListBatch("export", ids, "docx")') > 0)
+
+; Word 版 HTML 要把着色 class 翻成内联 style（Word 不认 class 选择器）
+Check("Export 有 HtmlForWord", InStr(srcExport, "static HtmlForWord(") > 0)
+Check("HtmlForWord 把 hljs-* 换成内联颜色", InStr(srcExport, "static HtmlForWord(") > 0
+    && InStr(srcExport, "#d73a49") > 0 && InStr(srcExport, "RegExReplace(html,") > 0)
+Check("Export 有 HtmlForWord 的图片不内嵌开关", InStr(srcExport, "inlineImages := true") > 0)
+Check("Export 有 PrepImage / HexOf", InStr(srcExport, "static PrepImage(") > 0
+    && InStr(srcExport, "static HexOf(") > 0)
+
 App.Log("=== 结束：PASS " PassN " / FAIL " FailN)
 Sleep 150
 ExitApp FailN ? 1 : 0

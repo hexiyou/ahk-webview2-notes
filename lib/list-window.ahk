@@ -298,6 +298,9 @@ class ListWindow {
                 m.Add("Markdown (*.md)", ListWindow.Cb(ListBatch("export", ids, "md")))
                 m.Add("网页  (*.html)", ListWindow.Cb(ListBatch("export", ids, "html")))
                 m.Add("RTF 文档 (*.rtf)", ListWindow.Cb(ListBatch("export", ids, "rtf")))
+                m.Add()
+                m.Add("PDF 文档 (*.pdf)", ListWindow.Cb(ListBatch("export", ids, "pdf")))
+                m.Add("Word 文档 (*.docx)", ListWindow.Cb(ListBatch("export", ids, "docx")))
             default:
                 return
         }
@@ -523,6 +526,9 @@ class ListWindow {
             em.Add("Markdown (*.md)", ListWindow.Cb(ListMenuExport(id, "md")))
             em.Add("网页  (*.html)", ListWindow.Cb(ListMenuExport(id, "html")))
             em.Add("RTF 文档 (*.rtf)", ListWindow.Cb(ListMenuExport(id, "rtf")))
+            em.Add()
+            em.Add("PDF 文档 (*.pdf)", ListWindow.Cb(ListMenuExport(id, "pdf")))
+            em.Add("Word 文档 (*.docx)", ListWindow.Cb(ListMenuExport(id, "docx")))
             m.Add("导出", em)
 
             m.Add()

@@ -67,7 +67,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 插入图片 | 拖文件进来 / `Ctrl+V` 粘截图 / 右键「插入图片…」；图片存 `data\images`，正文只留链接 |
 | 看图 | 正文里的图按 180px 高缩略显示，点一下铺满窗口看原图（再点或 `Esc` 关） |
 | **图片能带出去** | **对着图片右键（大图预览里、正文缩略图上都行）→「复制图片」直接粘到 Word / 微信 / 画图，或「另存为…」存到你要的位置**；另附复制文件路径、在文件夹中显示、从正文中删除 |
-| 导出 | 右键「导出」→ TXT / Markdown / HTML / RTF；HTML 会把图片内嵌成 data URI，单文件即可分享 |
+| 导出 | 右键「导出」→ TXT / Markdown / HTML / RTF / **PDF** / **Word**；HTML 把图片内嵌成 data URI，RTF 也把图拼进文件里，PDF 走 WebView2 原生打印（A4 + 1.5cm 边距），Word 靠本机 Office 转版（没装会提示，不会崩） |
 | **导入** | 右键「导入文件…（TXT / Markdown）」把外部笔记搬进来：便签里已有内容时会问**覆盖**还是**追加**；编码自动认（UTF-8 带/不带 BOM、UTF-16、GBK） |
 | 设置面板 | 托盘「设置…」或列表空白右键：启动行为、外观、新建便签的默认颜色、三个全局热键都能改 |
 | 自定义标题 | 列表和便签的右键菜单都有「重命名…」；不手动改就按正文第一行自动取 |
@@ -198,6 +198,10 @@ runtime\AutoHotkey64.exe note.ahk
 导入文件…（TXT / Markdown）  便签里已有内容时会问「覆盖」还是「追加」
 字号  ›        放大 / 缩小 / 恢复默认
 导出  ›        TXT / Markdown / HTML / RTF
+               PDF 文档 (*.pdf)
+               Word 文档 (*.docx)
+               ↑ 前四项是纯文本/标记，后两项要排版（PDF 建离屏窗口、Word 起 Office），
+                 慢一点，菜单里用分隔线隔开了
 ────────────
 收起这张
 删除这张…      带二次确认
@@ -406,7 +410,9 @@ wv2-notes/
 │  ├─ list-window.ahk    列表面板（单例；含排序/过滤/多选批量的宿主侧）
 │  ├─ settings-window.ahk 设置面板（单例 WebView2，ui\settings.*）
 │  ├─ ipc.ahk            ★ 外部调用接口：锚点窗口消息 + WM_COPYDATA + 回执（见 docs\ipc.md）
-│  ├─ export.ahk         导出：单张（TXT / MD / HTML / RTF）+ 批量（选目录、重名加序号）
+│  ├─ export.ahk         导出：TXT / MD / HTML / RTF（含图片内嵌）+ 批量（选目录、重名加序号）
+│  ├─ pdf.ahk            ★ PDF：WebView2 PrintToPdfAsync，A4 + 1.5cm 边距（见笔记 85）
+│  ├─ word.ahk           ★ Word：HTML → docx，交子进程跑 Word COM（见笔记 86–89）
 │  ├─ clip.ahk           ★ 剪贴板：文字（LF→CRLF）+ 图片（CF_DIB + PNG）
 │  ├─ win.ahk            窗口外观（透明/圆角/工作区/级联落点）
 │  ├─ json.ahk           极简 JSON（只处理扁平字段；大字段走线性扫描，别用正则）
@@ -454,7 +460,7 @@ runtime\AutoHotkey64.exe tools\probe-newbug.ahk
 
 # 菜单：回调参数个数、闭包、菜单项是否都包了包装器、三套右键菜单的两端是否对得上、
 #       代码复制按钮的接线 + Clip.SetText 的 CRLF 转换 +
-#       导入/排序/过滤/批量的两端接线（190 项断言，很快）
+#       导入/排序/过滤/批量/PDF/Word 的两端接线（212 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-menu.ahk
 
 # JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界 / 键存在性（35 项断言，很快）
@@ -515,8 +521,17 @@ runtime\AutoHotkey64.exe note.ahk --selftest-note
 #              代码着色 / 编辑菜单命令 / 双击标题栏最大化与还原
 runtime\AutoHotkey64.exe note.ahk --selftest-edit
 
-# 程序级自检：四种导出格式（TXT / MD / HTML / RTF）
+# 程序级自检：六种导出格式（TXT / MD / HTML / RTF / PDF / Word）
+#              RTF 断言会验图片真的编进了 \pict、hex 长度 = 2×文件大小、大图被降到 1600px
 runtime\AutoHotkey64.exe note.ahk --selftest-export
+
+# 程序级自检：PDF 导出（A4 尺寸 / 图片 / 字体子集 / 批量两张，8 项断言，约 5 秒）
+runtime\AutoHotkey64.exe note.ahk --selftest-pdf
+
+# 程序级自检：Word 导出（起子进程跑 Word COM，验 docx 里图片内嵌、代码底色、
+#              两张批量；本机没装 Office 时第一条就报"没有 Word"并整体判未通过，
+#              不会崩、也不会卡住等超时，6 项断言，约 20 秒）
+runtime\AutoHotkey64.exe note.ahk --selftest-docx
 
 # 程序级自检：设置面板（开窗 + 读值 + 颜色色块 + 拖大窗口重铺 +
 #              保存生效 + 非法热键拦截）
@@ -1124,3 +1139,72 @@ pwsh -File tools/make-icon.ps1
     过滤按钮上挂着一个 `0`"。`list.css` 顶部加了一条 `[hidden]{display:none !important}`
     兜底。对应的断言也不能只看 `.hidden` 属性（那是 `true` 但视觉上还在），
     要看 `getComputedStyle(el).display === 'none'`。
+
+83. **RTF 里塞图片，就是把文件 hex 一遍再拼进 `\pict`。** 格式是
+    `{\pict\pngblip\picw<px>\pich<px>\picwgoal<twips>\pichgoal<twips> <HEX>}`，
+    `\pngblip` / `\jpegblip` 按扩展名选。换算 **1px ≈ 15 twips**（1440/96），
+    宽度上限留 9000 twips 才不会顶出页边。代价要知道：hex 是**两倍体积**，
+    实测 2.88MB 的 PNG 导出后是 5.77MB 的 RTF —— 图多的便签会明显变大，
+    这是格式本身决定的，不是实现问题。
+    另外行内图和整行图要分开处理：整行 `![alt](src)` 直接出 `\pard\qc ... \par`；
+    行内的（夹在文字里）得先在 `RtfInline` 里抽成 `QNIMGM<n>QNIMGE` 占位符，
+    套完粗斜体那些正则之后再 `StrReplace` 换回来 —— 否则 hex 里随便一个数字
+    都可能被粗体正则咬掉半截。
+
+84. **`CryptBinaryToStringW` 的两个坑，一个坑 base64 一个坑 hex。** base64 用
+    `CRYPT_STRING_BASE64(1)` 时默认**每 64 字符插一个换行**，得再 `| 0x40000000`
+    （`CRYPT_STRING_NOCRLF`）才是干净的单行；十六进制更阴，`CRYPT_STRING_HEXRAW(0xC)`
+    输出末尾**带一个 CRLF**，70 字节的文件本该 140 字符，实际拿到 142 ——
+    断言当场对不上。统一 `Trim(..., " \t\r\n")` 一下最省事。
+    （这个 bug 只在断言里暴露，粘进 RTF 后 Word 也能忍那个换行，很容易漏。）
+
+85. **`PrintToPdfAsync` 三件事：回调里不能 await、默认是 Letter、背景要单独开。**
+    ① `ICoreWebView2_7.PrintToPdfAsync(path, settings)` 是无对话框直接出 PDF，没装
+    打印机的机器也能用。但**不能在 COM 事件回调里 `await` 它** —— 事件线程上等
+    自己派发的完成事件，永远不会返回，表现为"点了没反应"。要 `SetTimer(..., -30)`
+    退到独立线程再 await。② 默认纸张是**美式 Letter**（MediaBox 612×792），
+    必须自己 `CreatePrintSettings()` 设 `PageWidth=8.27 PageHeight=11.69`（英寸），
+    边距 `0.5906`（=1.5cm）。③ `ShouldPrintBackgrounds` 默认是 **false**，
+    代码块的浅底色会整片消失；`ShouldPrintHeaderAndFooter` 默认 true，会平白多出
+    页眉页脚。还有个小细节：`CreatePrintSettings` 要从 `wv.Environment` 取，
+    写成 `wvc.Environment`（屏幕那一侧）拿不到这个方法。
+    验 PDF 不能去 `InStr` 找 `/MediaBox` —— 文件里第一个 NUL 就把 `StrGet(..., "CP0")`
+    截断了，什么也搜不到。要么逐字节扫，要么按二进制读。
+
+86. **Word 必须甩进子进程跑，不能在本进程里 `ComObject("Word.Application")`。**
+    Word 只要弹一个模态框（"文档包含宏"、"是否恢复"、字体缺失），主进程的 UI 线程
+    就整个冻住 —— 便签窗口不动了，用户只能杀进程。做法是：主进程把每张便签先写成
+    HTML（`Export.HtmlForWord`）丢到临时目录，再写一份 `jobs.tsv` 清单，`Run` 起
+    自己（带 `--word-export <清单> --result <结果文件>`）跑一个隐藏子进程，主进程
+    `SetTimer` 轮询结果文件、180 秒不落地就超时收摊，顺手 Toast 汇总。
+    **子进程分支必须写在单实例锁之前** —— 写在后面的话第二次启动会被当成"又一个
+    实例"转发给已经运行的进程然后退出，永远出不来结果。
+
+87. **Word 导 HTML 只认标签选择器和内联 style，class 选择器一律不生效。**
+    代码着色是 `<span class="hljs-keyword">` 这种，Word 打开后**全黑**。
+    `HtmlForWord` 干的就是把 `class="hljs-*"` 换成 `style="color:#xxxxxx"`，
+    comment / quote 再加个 `font-style:italic`。验的时候比 `w:color` 的出现次数：
+    改之前 0 个色值，改之后 3 个。
+
+88. **Word 导入图片默认存成外链，换个机器就全裂。** HTML 里 `<img src="file:///...">`
+    进来后 `TargetMode="External"`，`word/media` 目录是空的。要逐张
+    `InlineShapes.Item(i).LinkFormat.SavePictureWithDocument := true` 再 `BreakLink()`
+    才真正嵌进 docx。验法是解包看 `word/media/image1.png` 在不在、大小对不对。
+
+89. **`for p in doc.Paragraphs` 会偶发卡死，必须 `Item(i)`。** 想给代码块加底纹
+    （`Paragraphs.Item(i).Shading.BackgroundPatternColor := 0xE5EDF0`，注意 Word
+    的 `BackgroundPatternColor` 是 **BGR** 不是 RGB）时，第一版用了 `for p in`，
+    结果子进程连日志都不写就挂在那儿。换成 `for i in 1..doc.Paragraphs.Count` 逐个
+    `Item(i)` 就稳了 —— 集合的 IEnumVARIANT 枚举在 Word 上不可靠。
+    `<pre>` 的 CSS 背景本来也不导入（生成的 XML 里 `w:shd` 是 0），只能靠这段补。
+
+90. **AHK v2 的 `Run()` 不返回 PID。** 这个版本里 `pid := Run(cmd)` 拿到的是**空串**，
+    下游"进程还活着吗"一判就是"已经退出"，于是刚起子进程就报失败。
+    要用输出参数：`Run(cmd, , "Hide", &pid)`。
+
+91. **二进制文件不能 `StrGet(buf, size, "CP0")` 转了再 `InStr`。** 文件里必然有 NUL，
+    字符串在第一个 NUL 处就断了，后面全看不见 —— 表现是"PDF 里明明有 `/Image`、
+    `/FontFile2`，断言全 FAIL"。要么按字节扫（写个 `BytesHas(blob, needle)` 双指针
+    逐个比），要么就别用字符串函数。顺带：A4 的 MediaBox 是
+    `[0 0 594.95996 841.91998`，8.27 英寸换算过来带浮点尾巴，断言只能比前缀
+    `/MediaBox [0 0 59`（Letter 是 612，一撞就分得开）。

@@ -630,13 +630,17 @@ class NoteWindow {
         fm.Add("恢复默认", (*) => App.ZoomFont(0))
         m.Add("字号", fm)
 
-        /* 导出：四种格式各一项。用子菜单而不是弹个"选格式"的对话框 ——
-           导出是低频操作，多一层菜单比多一个对话框省事。 */
+        /* 导出：四种纯文本/标记格式各一项，再加 PDF / Word 两种"排好版的文档"。
+           PDF 走 WebView2 自带的打印引擎，Word 交给本机的 Office —— 两者都比
+           前四种慢（建窗口 / 起 Word），所以摆在分隔线下面，别让人误以为是瞬时操作。 */
         em := Menu()
         em.Add("纯文本  (*.txt)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "txt")))
         em.Add("Markdown (*.md)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "md")))
         em.Add("网页  (*.html)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "html")))
         em.Add("RTF 文档 (*.rtf)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "rtf")))
+        em.Add()
+        em.Add("PDF 文档 (*.pdf)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "pdf")))
+        em.Add("Word 文档 (*.docx)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "docx")))
         m.Add("导出", em)
         /* 导入只收 TXT / Markdown：docx、pdf 要解析器，不属于"便签"的范畴。
            有这个入口之后，"把一段笔记从别处搬进来"就不用再复制粘贴了。 */

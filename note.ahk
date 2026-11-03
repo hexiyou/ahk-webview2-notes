@@ -29,6 +29,8 @@
 #Include lib\list-window.ahk
 #Include lib\settings-window.ahk
 #Include lib\ipc.ahk
+#Include lib\pdf.ahk
+#Include lib\word.ahk
 
 class App {
     static Name := "QuickNote"
@@ -58,6 +60,13 @@ class App {
         ; 任何未捕获异常都别弹模态框（单 UI 线程，弹了就全卡死），写日志就好
         OnError(NoteOnError)
         OnExit(NoteOnExit)
+
+        /* Word 导出的后台进程：必须在单实例锁**之前**判，否则会被正在跑的
+           那个实例当成"重复启动"，转发一下就退出了，父进程永远等不到结果。
+           这条路只碰文件、不建窗口，跑完自己退。 */
+        if App.HasArg("--word-export")
+            ExitApp Word.ExportManifest(App.ArgAfter("--word-export")
+                , App.ArgAfter("--result"))
 
         ; 1) 单实例：抢到锁的继续，抢不到的唤出已有实例后退出
         App.InstanceLock := DllCall("CreateMutexW", "ptr", 0, "int", 0, "wstr", "Local\QuickNote.SingleInstance", "ptr")
@@ -105,6 +114,8 @@ class App {
         }
         NoteWindow.Store := App.Store
         NoteWindow.Ctx := App.Ctx
+        ; PDF 导出要自己建一个隐藏的 WebView2，路径跟便签窗口共用一套
+        Pdf.Ctx := App.Ctx
 
         ; 5) 托盘与热键
         App.BuildTray()
@@ -184,6 +195,10 @@ class App {
             SetTimer(SelfTestImport, -2500)
         if App.HasArg("--selftest-batch")
             SetTimer(SelfTestBatch, -2500)
+        if App.HasArg("--selftest-pdf")
+            SetTimer(SelfTestPdf, -2500)
+        if App.HasArg("--selftest-docx")
+            SetTimer(SelfTestDocx, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -511,13 +526,19 @@ class App {
     }
 
     ; 导出（列表窗口的右键菜单走这里；便签窗口自己有一份 ExportAs）
+    /* PDF / Word 不归 export.ahk 管：一个要建隐藏窗口，一个要起子进程碰 Word，
+       都是"有副作用"的活儿。那边只管四种纯文本/标记格式。 */
     static ExportNote(id, fmt) {
         n := App.Store.Get(id)
         if !n {
             App.Toast("这张便签已经不在了")
             return
         }
-        Export.Save(n, fmt)
+        switch fmt {
+            case "pdf": Pdf.Save(n)
+            case "docx": Word.Save(n)
+            default: Export.Save(n, fmt)
+        }
     }
 
     /* 批量导出：先选一个文件夹，再逐张写。名称冲突交给 Export.SaveMany 处理。 */
@@ -532,7 +553,11 @@ class App {
             App.Toast("没有可导出的便签")
             return
         }
-        Export.SaveMany(notes, fmt)
+        switch fmt {
+            case "pdf": Pdf.SaveMany(notes)
+            case "docx": Word.SaveMany(notes)
+            default: Export.SaveMany(notes, fmt)
+        }
     }
 
     /* ---- 导入 ---------------------------------------------------------------
@@ -2638,6 +2663,221 @@ SelfTestIpcRun() {
         . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
 }
 
+/* 自检专用：一张 1x1 的 PNG 落在图片目录里，返回它的路径。
+   后面 ExportTestNote / PDF / Word 三个自检共用，别各造一份。 */
+ExportTestImage() {
+    imgDir := App.DataDir "\images"
+    if !DirExist(imgDir)
+        DirCreate imgDir
+    imgPath := imgDir "\_export-test.png"
+    b64 := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    buf := NoteWindow.B64Decode(b64)
+    try {
+        f := FileOpen(imgPath, "w")
+        f.RawWrite(buf, buf.Size)
+        f.Close()
+    }
+    return imgPath
+}
+
+/* 自检专用：一张"什么格式都有"的便签（标题/粗体/列表/待办/代码块/引用/图）。
+   不落库，只当对象传给 Export.Render 那些纯函数。 */
+ExportTestNote() {
+    BT := Chr(96)
+    imgPath := ExportTestImage()
+    md := "# 标题一`n`n"
+    md .= "普通**粗体**和*斜体*，还有~~删除线~~和" BT "code" BT "。`n`n"
+    md .= "- 列表项`n- [ ] 待办一`n- [x] 待办二`n`n"
+    md .= "1. 有序一`n2. 有序二`n`n"
+    md .= "> 引用一行`n`n"
+    md .= BT BT BT "js`nvar a = 1;`n" BT BT BT "`n`n"
+    md .= "---`n`n"
+    md .= "[链接](https://example.com) 和 ![图](" NoteWindow.FileUrl(imgPath) ")`n"
+    return {
+        title: "导出测试：标题/含非法字符",
+        body_md: md,
+        body_text: "标题一`n`n普通粗体和斜体，还有删除线和 code。`n`n列表项`n待办一`n待办二",
+        body_html: "<h1>标题一</h1><p>普通<b>粗体</b>和<i>斜体</i></p>"
+            . "<p><img src=`"" NoteWindow.FileUrl(imgPath) "`" alt=`"图`"></p>"
+            . "<pre><code data-lang=`"js`"><span class=`"hljs-keyword`">var</span>"
+            . " a = <span class=`"hljs-number`">1</span>;</code></pre>",
+        mode: "rich"
+    }
+}
+
+/* 自检专用：造一张指定像素尺寸的纯色 PNG（用来验"大图先缩"）。
+   GDI+ 直接画一张 ARGB 位图再存 PNG，文件很小但宽度是真的。 */
+MakeTestPng(path, w, h) {
+    if !Clip.GdipStart()
+        return false
+    bmp := 0
+    ; PixelFormat32bppARGB = 0x26200A
+    if (DllCall("gdiplus\GdipCreateBitmapFromScan0", "int", w, "int", h, "int", 0
+        , "uint", 0x26200A, "ptr", 0, "ptr*", &bmp) != 0 || !bmp)
+        return false
+    clsid := Buffer(16, 0)
+    DllCall("ole32\CLSIDFromString", "wstr", "{557CF406-1A04-11D3-9A73-0000F81EF32E}", "ptr", clsid)
+    hr := DllCall("gdiplus\GdipSaveImageToFile", "ptr", bmp, "wstr", path, "ptr", clsid, "ptr", 0)
+    DllCall("gdiplus\GdipDisposeImage", "ptr", bmp)
+    return (hr = 0 && FileExist(path))
+}
+
+/* 自检：PDF 导出。真的建一个隐藏 WebView2 再打印，所以慢（1~2 秒），
+   单独一个入口 —— 别混进 export 那组里拖慢日常回归。 */
+SelfTestPdf() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    try {
+        note := ExportTestNote()
+        out := App.DataDir "\_selftest.pdf"
+        out2 := App.DataDir "\_selftest2.pdf"
+        try FileDelete out
+        try FileDelete out2
+        RichSay("导出前目标文件不存在", !FileExist(out) && !FileExist(out2))
+        /* 一次给两张：顺带验"同一个隐藏窗口连续导航 + 打印"这条批量路径，
+           单张跑不出队列状态机的问题。 */
+        Pdf.Start([{ note: note, path: out }, { note: note, path: out2 }], SelfTestPdfDone)
+    } catch as e {
+        App.Log("SELFTEST PDF 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST PDF 结论：未通过（异常中断）")
+        SelfTestDone()
+    }
+}
+
+SelfTestPdfDone(ok, fail) {
+    Global RICH_PASS, RICH_FAIL
+    out := App.DataDir "\_selftest.pdf"
+    out2 := App.DataDir "\_selftest2.pdf"
+    RichSay("回调报 2 成功 0 失败（批量连续打印）", ok = 2 && fail = 0, "ok=" ok " fail=" fail)
+    RichSay("第二张也生成了", FileExist(out2), FileExist(out2) ? FileGetSize(out2) " 字节" : "没有")
+    try FileDelete out2
+    size := FileExist(out) ? FileGetSize(out) : 0
+    RichSay("PDF 文件真的落盘了", size > 2048, size " 字节")
+    blob := BytesOf(out)
+    RichSay("文件头是 %PDF", BytesHas(blob, "%PDF"))
+    /* 图片进没进 PDF：正文里那张 1x1 图会变成一个 XObject。
+       只查文件大小是不够的 —— 一张纯文字便签也能有几十 KB。 */
+    RichSay("图片作为 XObject 进了 PDF", BytesHas(blob, "/Image"))
+    RichSay("中文字体子集被内嵌", BytesHas(blob, "/FontFile2"))
+    /* A4 = 595×842pt。Chromium 默认给的是 Letter（612×792），
+       不显式设 A4 的话这条会挂 —— 这正是它存在的意义。 */
+    /* A4 的宽度是 595pt，但 Chromium 会算成 594.96（8.27in 换算的浮点误差），
+       所以只比前缀 "59"：Letter 是 612，一眼能分开。 */
+    RichSay("纸张是 A4（宽 59x，Letter 是 612）"
+        , BytesHas(blob, "/MediaBox [0 0 59")
+        , BytesHas(blob, "/MediaBox [0 0 59") ? "A4" : "不是 A4（大概率退回 Letter 了）")
+    try FileDelete out
+    App.Log("SELFTEST PDF 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+    SelfTestDone()
+}
+
+/* 自检：Word 导出。要起子进程 + 本机 Word，耗时 5 秒以上，单独一个入口。
+   没装 Office 的机器上这里会明确报"环境不支持"，而不是崩。 */
+SelfTestDocx() {
+    Global RICH_PASS, RICH_FAIL, DOCX_T0
+    RICH_PASS := 0, RICH_FAIL := 0, DOCX_T0 := A_TickCount
+    try {
+        if !Word.Available() {
+            RichSay("环境里有 Microsoft Word", false, "注册表里没有 Word.Application")
+            App.Log("SELFTEST DOCX 结论：未通过（这台机器没装 Word）")
+            SelfTestDone()
+            return
+        }
+        RichSay("环境里有 Microsoft Word", true)
+        note := ExportTestNote()
+        out := App.DataDir "\_selftest.docx"
+        out2 := App.DataDir "\_selftest2.docx"
+        try FileDelete out
+        try FileDelete out2
+        /* 两张一起：同一个 Word 实例连着转，验批量那条路（省一次 Word 启动）。 */
+        Word.Start([{ note: note, path: out }, { note: note, path: out2 }])
+        SetTimer(SelfTestDocxWait, 500)
+    } catch as e {
+        App.Log("SELFTEST DOCX 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST DOCX 结论：未通过（异常中断）")
+        SelfTestDone()
+    }
+}
+
+SelfTestDocxWait() {
+    Global RICH_PASS, RICH_FAIL, DOCX_T0
+    if Word.Pending {
+        if (A_TickCount - DOCX_T0 < 150000)
+            return
+        SetTimer(SelfTestDocxWait, 0)
+        RichSay("Word 导出在 150 秒内结束", false, "超时")
+        App.Log("SELFTEST DOCX 结论：未通过（超时）")
+        SelfTestDone()
+        return
+    }
+    SetTimer(SelfTestDocxWait, 0)
+    out := App.DataDir "\_selftest.docx"
+    out2 := App.DataDir "\_selftest2.docx"
+    RichSay("第二张也生成了", FileExist(out2), FileExist(out2) ? FileGetSize(out2) " 字节" : "没有")
+    try FileDelete out2
+    size := FileExist(out) ? FileGetSize(out) : 0
+    RichSay("docx 生成了", size > 4096, size " 字节")
+    blob := BytesOf(out)
+    RichSay("是合法的 zip（PK 头）", BytesHas(blob, "PK"))
+    /* docx 的 zip 目录里文件名是明文的，正文是压缩的 —— 所以只能查"有没有
+       这个条目"，别指望在原文里搜到 document.xml 的内容。 */
+    RichSay("包含 word/document.xml 条目", BytesHas(blob, "word/document.xml"))
+    /* 有这个条目 = Word 把图真正嵌进文档了。
+       没做 BreakLink 的话图片是 file:// 外链，zip 里根本没有 media 目录。 */
+    RichSay("图片内嵌（word/media 条目存在）", BytesHas(blob, "word/media/"))
+    try FileDelete out
+    App.Log("SELFTEST DOCX 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+    SelfTestDone()
+}
+
+/* 二进制文件读进内存，返回 { buf, size }。
+   ★ 不要用 StrGet(buf, size, "CP0") 转成字符串再去 InStr —— 二进制流里到处是
+     0x00，字符串一转就在第一个 NUL 处断掉（PDF 的 %PDF 在开头所以"看着能读"，
+     后面的 /Image、/MediaBox 全丢了，白白误判）。要查 ASCII 标记就用 BytesHas。 */
+BytesOf(path) {
+    size := 0
+    try size := FileGetSize(path)
+    if (size <= 0)
+        return { buf: 0, size: 0 }
+    buf := Buffer(size)
+    try {
+        f := FileOpen(path, "r")
+        f.RawRead(buf, size)
+        f.Close()
+    } catch
+        return { buf: 0, size: 0 }
+    return { buf: buf, size: size }
+}
+
+/* 在一段原始字节里找一小段 ASCII。PDF / zip 的字典和文件名都是明文，
+   这样查不用解压也不用解析格式。命中概率低，所以逐字节扫足够快。 */
+BytesHas(blob, needle) {
+    if !blob || !blob.buf || blob.size <= 0
+        return false
+    n := StrLen(needle)
+    if (n = 0 || blob.size < n)
+        return false
+    first := Ord(SubStr(needle, 1, 1))
+    last := blob.size - n
+    i := 0
+    while (i <= last) {
+        if (NumGet(blob.buf, i, "uchar") = first) {
+            hit := true
+            Loop n - 1 {
+                if (NumGet(blob.buf, i + A_Index, "uchar") != Ord(SubStr(needle, A_Index + 1, 1))) {
+                    hit := false
+                    break
+                }
+            }
+            if hit
+                return true
+        }
+        i += 1
+    }
+    return false
+}
+
 /* 自检：四种导出格式。不走 FileSelect（会卡住无人值守的测试），
    直接调 Export.Render 拿字符串断言，顺带真写一个 txt 验编码。 */
 SelfTestExport() {
@@ -2651,40 +2891,10 @@ SelfTestExport() {
 
 SelfTestExportRun() {
     Global RICH_PASS := 0, RICH_FAIL := 0
-    BT := Chr(96)
 
-    ; 一张 1x1 的 PNG 落在图片目录里，用来验 HTML 的内嵌图片
-    imgDir := App.DataDir "\images"
-    if !DirExist(imgDir)
-        DirCreate imgDir
-    imgPath := imgDir "\_export-test.png"
-    b64 := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-    buf := NoteWindow.B64Decode(b64)
-    try {
-        f := FileOpen(imgPath, "w")
-        f.RawWrite(buf, buf.Size)
-        f.Close()
-    }
-
-    md := "# 标题一`n`n"
-    md .= "普通**粗体**和*斜体*，还有~~删除线~~和" BT "code" BT "。`n`n"
-    md .= "- 列表项`n- [ ] 待办一`n- [x] 待办二`n`n"
-    md .= "1. 有序一`n2. 有序二`n`n"
-    md .= "> 引用一行`n`n"
-    md .= BT BT BT "js`nvar a = 1;`n" BT BT BT "`n`n"
-    md .= "---`n`n"
-    md .= "[链接](https://example.com) 和 ![图](" NoteWindow.FileUrl(imgPath) ")`n"
-
-    note := {
-        title: "导出测试：标题/含非法字符",
-        body_md: md,
-        body_text: "标题一`n`n普通粗体和斜体，还有删除线和 code。`n`n列表项`n待办一`n待办二",
-        body_html: "<h1>标题一</h1><p>普通<b>粗体</b>和<i>斜体</i></p>"
-            . "<p><img src=`"" NoteWindow.FileUrl(imgPath) "`" alt=`"图`"></p>"
-            . "<pre><code data-lang=`"js`"><span class=`"hljs-keyword`">var</span>"
-            . " a = <span class=`"hljs-number`">1</span>;</code></pre>",
-        mode: "rich"
-    }
+    note := ExportTestNote()
+    imgPath := ExportTestImage()
+    md := note.body_md
 
     ; ---- TXT：纯文本，不能残留任何标记 ----
     txt := Export.Render(note, "txt")
@@ -2719,6 +2929,38 @@ SelfTestExportRun() {
     RichSay("RTF 代码块用等宽字体", InStr(rtf, "\f1\fs18 ") > 0)
     RichSay("RTF 链接用 HYPERLINK 域", InStr(rtf, "HYPERLINK") > 0)
     RichSay("RTF 花括号配对（粗检）", Export_RtfBalanced(rtf))
+    /* 图片：以前这里是 [图片] 占位符，用户导出的 RTF 里图全没了。
+       现在必须真的带 \pict 数据，且十六进制长度对得上文件大小（1 字节 = 2 字符）。 */
+    RichSay("RTF 内嵌了图片（\pngblip）", InStr(rtf, "\pngblip") > 0)
+    RichSay("占位标记全部换回了图片", InStr(rtf, "QNIMGM") = 0)
+    RichSay("RTF 图片带显示尺寸", InStr(rtf, "\picwgoal") > 0 && InStr(rtf, "\pichgoal") > 0)
+    hexLen := 2 * FileGetSize(imgPath)
+    mi := RegExMatch(rtf, "\\pngblip[^}]*? ([0-9A-Fa-f]+)\}", &mm)
+    RichSay("RTF 图片数据长度与文件一致"
+        , mi > 0 && StrLen(mm[1]) = hexLen
+        , "hex=" (mi > 0 ? StrLen(mm[1]) : -1) " 期望=" hexLen)
+
+    ; ---- Word 用的 HTML：保留 file:// 引用（Word 不认 data URI） ----
+    whtml := Export.Html(note, false)
+    RichSay("Word 版 HTML 保留 file:// 引用", InStr(whtml, "file:///") > 0)
+    RichSay("Word 版 HTML 不内嵌 data URI", InStr(whtml, "data:image/") = 0)
+    whtml2 := Export.HtmlForWord(note)
+    RichSay("Word 版 HTML 把着色 class 翻成内联 style"
+        , InStr(whtml2, 'style="color:#d73a49"') > 0
+          && InStr(whtml2, 'class="hljs-keyword"') = 0)
+
+    ; ---- 大图先缩再嵌：4000px 宽的图应被缩到 1600px ----
+    bigPath := App.DataDir "\_export-big.png"
+    if MakeTestPng(bigPath, 4000, 120) {
+        p := Export.PrepImage(bigPath)
+        RichSay("超过 3200px 的图被缩到 1600px", IsObject(p) && p.w = 1600, IsObject(p) ? p.w "x" p.h : "读不出来")
+        RichSay("缩图后仍是 PNG", IsObject(p) && p.kind = "png")
+        small := Export.PrepImage(imgPath)
+        RichSay("小图不动（1x1 保持原样）", IsObject(small) && small.w = 1, IsObject(small) ? small.w : "读不出来")
+    } else {
+        RichSay("造一张 4000×120 的测试图", false, "GDI+ 失败")
+    }
+    try FileDelete bigPath
 
     ; ---- 真写一个文件，验编码（BOM + 中文） ----
     outTxt := App.DataDir "\_export-test.txt"
