@@ -1,4 +1,9 @@
 #Requires AutoHotkey v2.0
+; 警告不要弹模态框：本目录的脚本常在无人值守下跑，一个框就能把整轮测试挂死。
+; 只把"变量没赋值"（= 漏了某个 #Include）放到 stdout，其余类型丢给调试器。
+#Warn VarUnset, StdOut
+#Warn LocalSameAsGlobal, OutputDebug
+#Warn Unreachable, OutputDebug
 #ErrorStdOut UTF-8
 ; 端到端：真窗口 + 真 WebView2 + 真 SQLite，走一遍"输入→防抖→落库→切模式→改色→几何→重开"。
 #Include ..\lib\json.ahk

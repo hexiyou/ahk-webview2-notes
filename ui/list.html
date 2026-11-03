@@ -44,6 +44,47 @@
     <input id="q" type="text" placeholder="搜索标题和正文…" autocomplete="off" spellcheck="false">
   </div>
 
+  <!-- 排序 / 过滤 / 全选。排序用原生 <select>（WebView2 里就是系统下拉，
+       键盘也能用）；过滤走宿主弹出的原生菜单 —— 五个三态条件横着排不开。 -->
+  <div class="tools">
+    <select id="sortSel" class="sort" title="排序方式">
+      <option value="default:desc">默认（置顶优先）</option>
+      <option value="created:desc">创建时间 ↓</option>
+      <option value="created:asc">创建时间 ↑</option>
+      <option value="updated:desc">更新时间 ↓</option>
+      <option value="updated:asc">更新时间 ↑</option>
+      <option value="title:asc">标题 ↑</option>
+      <option value="title:desc">标题 ↓</option>
+    </select>
+    <button id="btnFilter" class="chip" title="按条件过滤（可多选，条件之间同时满足）">
+      过滤<i class="fcount" id="fCount" hidden></i>
+    </button>
+    <button id="btnClearFilter" class="chip plain" title="清空全部过滤条件" hidden>清空</button>
+    <span class="grow"></span>
+    <label class="all" title="全选列表里看得见的这些（不会选中被过滤掉的）">
+      <input type="checkbox" id="chkAll"><span>全选</span>
+    </label>
+  </div>
+
+  <!-- 批量条：只在勾选了便签时出现，换掉底部的提示行。
+       「置顶 / 收起」两个按钮的字会跟着选中项的状态变（全置顶了就显示"取消置顶"），
+       少一个按钮，也少一次想"这按钮到底会置顶还是取消"。 -->
+  <div class="selbar" id="selbar" hidden>
+    <div class="selinfo">
+      已选 <b id="selN">0</b> 张
+      <button class="mini link" id="btnSelClear">清除</button>
+    </div>
+    <div class="selacts">
+      <button class="mini" id="actPin" data-act="pin">置顶</button>
+      <button class="mini" id="actHide" data-act="hide">收起</button>
+      <button class="mini" data-act="color">颜色</button>
+      <button class="mini" data-act="opacity">透明度</button>
+      <button class="mini" data-act="export">导出</button>
+      <button class="mini" data-act="clear-hotkey">清快捷键</button>
+      <button class="mini danger" data-act="delete">删除…</button>
+    </div>
+  </div>
+
   <main class="list" id="list"></main>
 
   <footer class="foot">

@@ -1,4 +1,9 @@
 #Requires AutoHotkey v2.0
+; 警告不要弹模态框：本目录的脚本常在无人值守下跑，一个框就能把整轮测试挂死。
+; 只把"变量没赋值"（= 漏了某个 #Include）放到 stdout，其余类型丢给调试器。
+#Warn VarUnset, StdOut
+#Warn LocalSameAsGlobal, OutputDebug
+#Warn Unreachable, OutputDebug
 #SingleInstance Off
 ; ============================================================================
 ;  probe-hit.ahk —— 分层窗口的鼠标命中测试

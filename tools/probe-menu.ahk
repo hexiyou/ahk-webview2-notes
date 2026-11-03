@@ -420,6 +420,72 @@ Check("Clip.SetText 不会把 CRLF 变成 CRCRLF"
 Check("Clip.SetText 空串不写剪贴板", Clip.SetText("") = 0)
 try A_Clipboard := oldText
 
+; ---------------------------------------------------------------------------
+; 11. 导入 / 列表的排序过滤批量
+;     这层的逻辑（SQL 拼接、批量动作的副作用）在 probe-sort 和
+;     note.ahk --selftest-batch / --selftest-import 里真跑；
+;     这里只钉"两端接线对得上"—— 页面发什么、宿主认不认、菜单项在不在。
+; ---------------------------------------------------------------------------
+
+listHtml := FileRead(A_ScriptDir "\..\ui\list.html", "UTF-8")
+srcList := FileRead(A_ScriptDir "\..\lib\list-window.ahk", "UTF-8")
+
+; 便签菜单的导入入口
+Check("NoteWindow 有 Import 方法", NoteWindow.Prototype.HasMethod("Import"))
+Check("便签菜单有「导入文件…」", InStr(srcWin, "导入文件…") > 0)
+Check("导入入口标了支持的格式", InStr(srcWin, "TXT / Markdown") > 0)
+
+; App 侧的四个入口。探针里的 App 是本地 stub（不加载 note.ahk），
+; 所以只能查源码文本，不能 HasMethod。
+srcApp := FileRead(A_ScriptDir "\..\note.ahk", "UTF-8")
+srcExport := FileRead(A_ScriptDir "\..\lib\export.ahk", "UTF-8")
+for m in ["ImportNote", "BatchNotes", "ConfirmBatchDelete", "ExportMany", "ReadTextFile"]
+    Check("App 有 " m, InStr(srcApp, "static " m "(") > 0)
+for m in ["SaveMany", "UniquePath", "WriteTo"]
+    Check("Export 有 " m, InStr(srcExport, "static " m "(") > 0)
+
+; 页面的导入落地
+Check("页面接得住 import 消息", InStr(noteJs, "case 'import'") > 0)
+Check("页面导入分覆盖/追加", InStr(noteJs, "mode === 'replace'") > 0)
+Check("TXT 导入走 textContent（不当 HTML 解析）"
+    , InStr(noteJs, "d.textContent = line") > 0)
+Check("Markdown 导入走 MD.render", InStr(noteJs, "isMd ? MD.render(text)") > 0)
+Check("追加前会削掉末尾空块", InStr(noteJs, "trimTrailingBlank(editor)") > 0)
+
+; 列表页 → 宿主的三种新消息
+for t in ["batch", "batch-menu", "filter-menu", "sort"]
+    Check("页面会发 " t, RegExMatch(listJs, "type:\s*'" t "'") > 0)
+for t in ["batch", "batch-menu", "filter-menu"]
+    Check("宿主认 " t, InStr(srcList, 'case "' t '"') > 0)
+
+; 列表窗口的排序/过滤/批量零件
+for m in ["ShowFilterMenu", "ShowBatchMenu", "ApplyFilter", "ApplyClearFilter", "SaveView"]
+    Check("ListWindow 有 " m, ListWindow.HasMethod(m))
+Check("排序状态持久化到配置", InStr(srcList, "listSort") > 0)
+Check("过滤状态持久化到配置", InStr(srcList, "listFilter") > 0)
+Check("过滤条件五种", InStr(srcList, "hotkey") > 0 && InStr(srcList, "pinned") > 0
+    && InStr(srcList, "shown") > 0 && InStr(srcList, "image") > 0 && InStr(srcList, "code") > 0)
+Check("Store.Query 支持排序 + 过滤", Store.Prototype.HasMethod("Query"))
+
+; 列表页面上的零件
+for id in ["sortSel", "fCount", "btnClearFilter", "chkAll", "selN", "selbar"]
+    Check("列表页有 #" id, InStr(listHtml, "id=`"" id "`"") > 0)
+; 排序下拉给了 7 项（默认 1 + 3 个字段 × 正倒序）
+optN := 0
+if RegExMatch(listHtml, "(?s)<select[^>]*id=`"sortSel`".*?</select>", &sm) {
+    p := 1
+    while (p := RegExMatch(sm[0], "<option", &m3, p)) {
+        optN += 1
+        p += StrLen(m3[0])
+    }
+}
+Check("排序下拉里确实有 7 个 <option>", optN = 7, optN)
+
+; 批量条的按钮名要和 list.js 里的 data-act 对得上（少一个就是点了没反应）
+for act in ["pin", "hide", "color", "opacity", "export", "clear-hotkey", "delete"]
+    Check("批量按钮 data-act=" act, InStr(listHtml, "data-act=`"" act "`"") > 0)
+Check("宿主认 filter-clear", InStr(srcList, 'case "filter-clear"') > 0)
+
 App.Log("=== 结束：PASS " PassN " / FAIL " FailN)
 Sleep 150
 ExitApp FailN ? 1 : 0

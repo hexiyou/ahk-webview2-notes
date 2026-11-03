@@ -110,6 +110,70 @@ class Store {
         return this._Rows(this.db.Query("SELECT * FROM notes" . Store.ORDER))
     }
 
+    /* 排序 + 过滤 + 关键字，一次拼出来。列表窗口只走这一个入口 ——
+       拆成三份实现的话，"排序改了、过滤还在用上一版"这类错很难发现。
+
+       sort    default（置顶优先、新建在前）| title | created | updated
+       desc    1 = 倒序（只对 title/created/updated 有意义，default 是固定的）
+       filter  Map，键 hotkey / pinned / shown / image / code 取 0 或 1，
+               缺键 = 不限。1 表示"有快捷键 / 已置顶 / 已展开 / 含图片 / 含代码块"。
+               多个条件是 AND：勾了"已置顶"又勾"含图片"，就是既置顶又有图。
+
+       为什么过滤也放 SQL：图片/代码块要看正文内容（body_html），而列表页拿不到
+       正文 —— 它只有宿主推过去的摘要。放这里还能让"搜索"和"过滤"天然叠加。 */
+    Query(term := "", sort := "default", desc := 1, filter := 0) {
+        where := ""
+        if (f := Store._FilterSql(filter)) != ""
+            where .= " WHERE " f
+        t := Trim(term)
+        if (t != "") {
+            like := "%" t "%"
+            cond := "(title LIKE ? OR body_text LIKE ? OR body_md LIKE ?)"
+            where .= (where = "") ? " WHERE " cond : " AND " cond
+        }
+        sql := "SELECT * FROM notes" where Store._SortSql(sort, desc)
+        if (t != "")
+            return this._Rows(this.db.Query(sql, like, like, like))
+        return this._Rows(this.db.Query(sql))
+    }
+
+    static _SortSql(sort, desc) {
+        d := desc ? " DESC" : " ASC"
+        switch sort {
+            case "title": return " ORDER BY title" d ", id" d
+            case "created": return " ORDER BY created_at" d ", id" d
+            case "updated": return " ORDER BY updated_at" d ", id" d
+        }
+        return Store.ORDER
+    }
+
+    /* 过滤条件 → WHERE 片段。值和列名都是写死的（不从外部拼），
+       唯一的输入只是"挑哪一条"，没有注入面。 */
+    static _FilterSql(filter) {
+        if !IsObject(filter)
+            return ""
+        /* 三个反引号不能直接写在字符串里（AHK 的转义字符就是它），拼出来 */
+        static bt3 := Chr(96) . Chr(96) . Chr(96)
+        rules := Map(
+            "hotkey", ["hotkey<>''", "hotkey=''"],
+            "pinned", ["pinned=1", "pinned=0"],
+            "shown",  ["hidden=0", "hidden=1"],
+            "image",  ["body_html LIKE '%<img%'", "body_html NOT LIKE '%<img%'"],
+            "code",   ["(body_html LIKE '%<pre%' OR body_md LIKE '%" bt3 "%')"
+                     , "(body_html NOT LIKE '%<pre%' AND body_md NOT LIKE '%" bt3 "%')"])
+        out := ""
+        for key, pair in rules {
+            if !filter.Has(key)
+                continue
+            v := filter[key]
+            if (v = "" || v < 0)          ; -1 / 空 = 不限
+                continue
+            sql := pair[v ? 1 : 2]
+            out .= (out = "") ? sql : " AND " sql
+        }
+        return out
+    }
+
     ; 桌面上的那些：置顶优先
     Visible() {
         return this._Rows(this.db.Query("SELECT * FROM notes WHERE hidden=0" . Store.ORDER))

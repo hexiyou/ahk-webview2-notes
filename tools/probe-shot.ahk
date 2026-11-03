@@ -1,4 +1,9 @@
 #Requires AutoHotkey v2.0
+; 警告不要弹模态框：本目录的脚本常在无人值守下跑，一个框就能把整轮测试挂死。
+; 只把"变量没赋值"（= 漏了某个 #Include）放到 stdout，其余类型丢给调试器。
+#Warn VarUnset, StdOut
+#Warn LocalSameAsGlobal, OutputDebug
+#Warn Unreachable, OutputDebug
 #ErrorStdOut UTF-8
 ; 渲染截图：把便签页/列表页的合成结果存成 PNG（不含窗口边框，仅页面内容）。
 ; 本机没有物理显示器时，这是唯一能"看到"界面的办法。

@@ -39,15 +39,66 @@ class Export {
         try {
             ; TXT / MD / HTML 写 UTF-8 带 BOM：记事本、VS Code、浏览器都能正确认中文；
             ; RTF 内容全是 ASCII（中文已转义），写不写 BOM 都一样，按 UTF-8-RAW 来
-            enc := ext = "rtf" ? "UTF-8-RAW" : "UTF-8"
-            fh := FileOpen(f, "w", enc)
-            fh.Write(text)
-            fh.Close()
+            Export.WriteTo(f, ext, text)
         } catch as e {
             App.Toast("写文件失败：" CleanComError(e.Message))
             return
         }
         App.Toast("已导出 " StrUpper(ext) "：" f)
+    }
+
+    /* 批量导出：先选一个文件夹，再逐张写。
+       ★ 不去逐张弹"另存为"——十张便签就是十个对话框，中途取消还会留下
+         一半文件。选一次目录，剩下的交给代码。
+       ★ 同名要加序号：便签标题重复很常见（"（无标题）"更是），
+         直接覆盖的话"导出十张只剩一张"。 */
+    static SaveMany(notes, fmt) {
+        if !notes.Length
+            return
+        dir := FileSelect("D", A_Desktop, "批量导出 " StrUpper(fmt) " —— 选一个文件夹")
+        if (dir = "")
+            return
+        dir := RTrim(dir, "\")
+        used := Map()
+        ok := 0, fail := 0
+        for n in notes {
+            path := Export.UniquePath(dir, Export.FileStem(n), fmt, used)
+            try {
+                Export.WriteTo(path, fmt, Export.Render(n, fmt))
+                ok += 1
+            } catch as e {
+                fail += 1
+                App.Log("批量导出失败：id=" n.id " / " CleanComError(e.Message))
+            }
+        }
+        if (fail)
+            App.Toast("导出完成：" ok " 张成功，" fail " 张失败（" dir "）")
+        else
+            App.Toast("已导出 " ok " 张到 " dir)
+    }
+
+    /* 给 dir 挑一个不撞名的文件路径。used 是本批已经用掉的（键是转小写的
+       文件名）—— Windows 文件系统大小写不敏感，"Note.md" 和 "note.md" 是
+       同一个文件，不转小写就会互相覆盖。
+       目标目录里已经存在同名文件时也往后排：批量导出是"多出几份"，
+       不该悄悄吃掉别人上次导出的东西。 */
+    static UniquePath(dir, stem, fmt, used) {
+        name := stem "." fmt
+        i := 2
+        while (used.Has(StrLower(name)) || FileExist(dir "\" name)) {
+            name := stem " (" i ")." fmt
+            i += 1
+        }
+        used[StrLower(name)] := 1
+        return dir "\" name
+    }
+
+    ; 统一写盘入口：编码只在这一处决定
+    static WriteTo(path, fmt, text) {
+        enc := (fmt = "rtf") ? "UTF-8-RAW" : "UTF-8"
+        fh := FileOpen(path, "w", enc)
+        try fh.Write(text)
+        finally fh.Close()
     }
 
     static Render(note, fmt) {

@@ -16,6 +16,12 @@ class ListWindow {
     static Hooks := 0
     static Win := 0
     static Query := ""
+    /* 视图状态：怎么排、筛掉了谁。页面是"显示者"，这里是"持有者" ——
+       因为真正执行排序/过滤的是 SQL（Store.Query），页面连正文都拿不到。
+       两个值都存进 config.ini，下次开窗还是上次那副样子。 */
+    static SortKey := "default"
+    static SortDesc := 1
+    static Filter := 0
     /* 列表窗口自己的置顶。和便签的置顶不是一回事：那个是每条便签的字段（存库里），
        这个是窗口偏好，存在 config.ini 的 [window] listTopmost，下次开还置顶。 */
     static Topmost := 0
@@ -41,6 +47,7 @@ class ListWindow {
             }
         }
         ctx := ListWindow.Ctx
+        ListWindow.LoadView()
         ; 置顶是窗口偏好，开窗前就要定下来（Gui 的 +AlwaysOnTop 只能在创建时给，
         ; 之后补 WinSetAlwaysOnTop 也行，但会闪一下）
         ListWindow.Topmost := App.Cfg("window", "listTopmost", 0) ? 1 : 0
@@ -155,6 +162,148 @@ class ListWindow {
         try App.SetCfg("window", "listGeo", r.x "," r.y "," c.w "," c.h)
     }
 
+    /* ---- 视图状态（排序 / 过滤） ------------------------------------------
+       存成两行配置：listSort = "updated:desc"，listFilter = "hotkey=1;image=0"。
+       纯字符串而不是 JSON：config.ini 就该是人能手改的东西。 */
+
+    static LoadView() {
+        ListWindow.Filter := Map()
+        s := App.Cfg("window", "listSort", "default:desc")
+        p := StrSplit(s, ":")
+        key := (p.Length >= 1) ? Trim(p[1]) : "default"
+        if !(key = "title" || key = "created" || key = "updated")
+            key := "default"
+        ListWindow.SortKey := key
+        ListWindow.SortDesc := (p.Length >= 2 && Trim(p[2]) = "asc") ? 0 : 1
+
+        f := App.Cfg("window", "listFilter", "")
+        for part in StrSplit(f, ";") {
+            if !RegExMatch(Trim(part), "^(\w+)=(\d)$", &m)
+                continue
+            k := m[1]
+            if (k != "hotkey" && k != "pinned" && k != "shown" && k != "image" && k != "code")
+                continue                        ; 配置被人手改花了也不认
+            ListWindow.Filter[k] := m[2] + 0
+        }
+    }
+
+    static SaveView() {
+        App.SetCfg("window", "listSort"
+            , ListWindow.SortKey ":" (ListWindow.SortDesc ? "desc" : "asc"))
+        s := ""
+        for k, v in ListWindow.Filter
+            s .= (s = "" ? "" : ";") k "=" v
+        App.SetCfg("window", "listFilter", s)
+    }
+
+    ; 过滤条件的定义（顺序即菜单顺序）。Map 的遍历是哈希序，菜单会乱，所以用数组。
+    static FilterDefs() {
+        return [
+            { key: "hotkey", title: "快捷键",   yes: "已分配快捷键", no: "未分配快捷键" },
+            { key: "pinned", title: "置顶",     yes: "已置顶",       no: "未置顶" },
+            { key: "shown",  title: "显示状态", yes: "已展开（显示）", no: "已收起" },
+            { key: "image",  title: "图片",     yes: "含图片",       no: "不含图片" },
+            { key: "code",   title: "代码块",   yes: "含代码块",     no: "不含代码块" }]
+    }
+
+    static FilterCount() => ListWindow.Filter ? ListWindow.Filter.Count : 0
+
+    /* 过滤菜单：五项，每项三态（不限 / 是 / 否）。用系统原生菜单而不是页面里的
+       一排下拉框 —— 五个三态控件横着排不开，380px 宽的窗口里会被挤成一坨。 */
+    static ShowFilterMenu() {
+        if !ListWindow.Win
+            return
+        f := ListWindow.Filter
+        m := Menu()
+        clearLabel := "清空全部过滤条件"
+        m.Add(clearLabel, ListWindow.Cb(ListFilterClear()))
+        if (ListWindow.FilterCount() = 0) {
+            try m.Disable(clearLabel)
+        }
+        m.Add()
+        for d in ListWindow.FilterDefs() {
+            cur := f.Has(d.key) ? f[d.key] : -1
+            sub := Menu()
+            sub.Add("不限", ListWindow.Cb(ListFilterSet(d.key, -1)))
+            if (cur = -1)
+                sub.Check("不限")
+            sub.Add(d.yes, ListWindow.Cb(ListFilterSet(d.key, 1)))
+            if (cur = 1)
+                sub.Check(d.yes)
+            sub.Add(d.no, ListWindow.Cb(ListFilterSet(d.key, 0)))
+            if (cur = 0)
+                sub.Check(d.no)
+            m.Add(d.title, sub)
+        }
+        m.Show()
+    }
+
+    static SetFilter(key, val) {
+        if !ListWindow.Filter
+            ListWindow.Filter := Map()
+        if (val < 0)
+            ListWindow.Filter.Delete(key)
+        else
+            ListWindow.Filter[key] := (val ? 1 : 0)
+        ListWindow.SaveView()
+    }
+
+    static ClearFilter() {
+        ListWindow.Filter := Map()
+        ListWindow.SaveView()
+    }
+
+    /* 菜单项点完的收尾：改完状态要回推，否则用户点"含图片"却没反应。
+       放在类里而不是顶层闭包：箭头函数只能写一个表达式，
+       "改状态 + 回推"是两步。 */
+    static ApplyFilter(key, val) {
+        ListWindow.SetFilter(key, val)
+        ListWindow.PushAll(ListWindow.Query)
+    }
+
+    static ApplyClearFilter() {
+        ListWindow.ClearFilter()
+        ListWindow.PushAll(ListWindow.Query)
+    }
+
+    static RunBatch(action, ids, arg) {
+        ListWindow.Call("onBatch", action, ids, arg)
+        ListWindow.PushAll(ListWindow.Query)
+    }
+
+    /* 批量操作里的三个"要选值"的动作（颜色 / 透明度 / 导出格式）。
+       都只是把值点出来，真正干活的是 App.BatchNotes —— 它还要同步已开的窗口。 */
+    static ShowBatchMenu(kind, ids) {
+        if !ListWindow.Win || !ids.Length
+            return
+        m := Menu()
+        switch kind {
+            case "color":
+                for cname in NoteWindow.ColorKeys() {
+                    if !NoteWindow.IsColor(cname)
+                        continue
+                    m.Add(NoteWindow.ColorLabel(cname)
+                        , ListWindow.Cb(ListBatch("color", ids, cname)))
+                }
+            case "opacity":
+                m.Add("重置透明度（100%）", ListWindow.Cb(ListBatch("opacity", ids, 100)))
+                m.Add()
+                for pct in NoteWindow.OpacityLevels() {
+                    if (pct = 100)
+                        continue
+                    m.Add(pct "%", ListWindow.Cb(ListBatch("opacity", ids, pct)))
+                }
+            case "export":
+                m.Add("纯文本  (*.txt)", ListWindow.Cb(ListBatch("export", ids, "txt")))
+                m.Add("Markdown (*.md)", ListWindow.Cb(ListBatch("export", ids, "md")))
+                m.Add("网页  (*.html)", ListWindow.Cb(ListBatch("export", ids, "html")))
+                m.Add("RTF 文档 (*.rtf)", ListWindow.Cb(ListBatch("export", ids, "rtf")))
+            default:
+                return
+        }
+        m.Show()
+    }
+
     /* 切换列表窗口的置顶。窗口不在也照样记下偏好（下次打开就是置顶的），
        config.ini 写盘是 IniWrite，很便宜，不做合并。 */
     static SetTopmost(on) {
@@ -234,12 +383,27 @@ class ListWindow {
             switch type {
                 case "ready":
                     ListWindow.PushInit()
-                    ListWindow.Push()
+                    ListWindow.PushAll()
                 case "refresh":
-                    ListWindow.Push(ListWindow.Query)
+                    ListWindow.PushAll(ListWindow.Query)
                 case "search":
                     ListWindow.Query := JsonStr(raw, "q")
-                    ListWindow.Push(ListWindow.Query)
+                    ListWindow.PushAll(ListWindow.Query)
+                /* 排序：页面把"想按什么排"发上来，这里改状态、落盘、再回推。
+                   页面的下拉框不自己留状态 —— 两边各存一份必然会有一天对不上。 */
+                case "sort":
+                    ListWindow.SetSort(JsonStr(raw, "key", "default"), JsonNum(raw, "desc", 1))
+                    ListWindow.PushAll(ListWindow.Query)
+                case "filter-menu":
+                    ListWindow.ShowFilterMenu()
+                case "filter-clear":
+                    ListWindow.ApplyClearFilter()
+                case "batch-menu":
+                    ListWindow.ShowBatchMenu(JsonStr(raw, "kind"), JsonNumArray(raw, "ids"))
+                case "batch":
+                    ListWindow.Call("onBatch", JsonStr(raw, "action")
+                        , JsonNumArray(raw, "ids"), JsonNum(raw, "on"))
+                    ListWindow.PushAll(ListWindow.Query)
                 case "new":
                     if h && h.Has("onNew")
                         h["onNew"]()
@@ -394,11 +558,45 @@ class ListWindow {
         try ListWindow.Win.wv.PostWebMessageAsJson(json)
     }
 
-    ; 推一批便签到页面；term 为空推全部（含已收起）
+    /* 排序/过滤状态单独发一条。它跟"列表内容"是两件事：内容每次操作都变，
+       状态只在用户动排序/过滤时变 —— 混在一起会让页面每次刷新都把下拉框
+       重设一遍（正在展开的下拉会被合上）。 */
+    static PushState() {
+        if !ListWindow.Win
+            return
+        json := '{"type":"state"'
+            . ',"sort":' JsonQuote(ListWindow.SortKey)
+            . ',"desc":' (ListWindow.SortDesc ? 1 : 0)
+            . ',"filter":{'
+        n := 0
+        for k, v in ListWindow.Filter {
+            json .= (n ? "," : "") . '"' k '":' v
+            n += 1
+        }
+        json .= '}}'
+        try ListWindow.Win.wv.PostWebMessageAsJson(json)
+    }
+
+    static PushAll(term := "") {
+        ListWindow.PushState()
+        ListWindow.Push(term)
+    }
+
+    static SetSort(key, desc) {
+        if !(key = "title" || key = "created" || key = "updated")
+            key := "default"
+        ListWindow.SortKey := key
+        ListWindow.SortDesc := desc ? 1 : 0
+        ListWindow.SaveView()
+    }
+
+    /* 推一批便签到页面；term 为空推全部（含已收起）。
+       hasImage / hasCode 只用来给行上画小标记（也方便"我明明筛了含图片"时
+       一眼确认），真正的过滤在 SQL 里做过了。 */
     static Push(term := "") {
         if !ListWindow.Win
             return
-        notes := (term = "") ? ListWindow.Store.All() : ListWindow.Store.SearchAll(term)
+        notes := ListWindow.Store.Query(term, ListWindow.SortKey, ListWindow.SortDesc, ListWindow.Filter)
         json := '{"type":"notes","items":['
         for i, n in notes {
             if (i > 1)
@@ -412,6 +610,9 @@ class ListWindow {
             json .= ',"opacity":' n.opacity
             ; 角标显示人话（Ctrl+Alt+1），库里存的还是 ^!1
             json .= ',"hk":' JsonQuote(n.hotkey = "" ? "" : NoteWindow.HotkeyPretty(n.hotkey))
+            json .= ',"hasImage":' (InStr(n.body_html, "<img") ? 1 : 0)
+            json .= ',"hasCode":' (InStr(n.body_html, "<pre") ? 1 : 0)
+            json .= ',"created":' n.created_at
             json .= ',"updated":' n.updated_at
             json .= "}"
         }
@@ -479,6 +680,21 @@ ListMenuOpacity(id, pct) {
 
 ListMenuHotkey(id) {
     return () => ListWindow.CallThenPush("onHotkey", id)
+}
+
+; ---- 过滤 / 批量（都是菜单回调，统一经 Cb 吃掉多余参数）------------------
+ListFilterSet(key, val) {
+    return () => ListWindow.ApplyFilter(key, val)
+}
+
+ListFilterClear() {
+    return () => ListWindow.ApplyClearFilter()
+}
+
+/* 批量菜单里的一项：action 是颜色名/档位/格式。
+   ids 是数组，闭包捕获的是引用 —— 菜单项不会在别处被改，安全。 */
+ListBatch(action, ids, arg) {
+    return () => ListWindow.RunBatch(action, ids, arg)
 }
 
 ListMenuHide(id) {

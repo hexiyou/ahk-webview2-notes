@@ -68,6 +68,9 @@
            走状态栏而不是系统托盘气泡：气泡会被置顶的便签盖住，而且用户
            正在盯着这张便签，反馈就该出现在它自己身上。 */
         case 'hint': hint(msg.text || '', !!msg.ok); break;
+        /* 宿主读好文件、问过"覆盖还是追加"之后，把正文发过来（见 App.ImportNote）。
+           怎么落地是页面的事：富文本模式要把 Markdown 渲染成 DOM，源码模式原样贴。 */
+        case 'import': doImport(msg); break;
       }
     });
   }
@@ -695,6 +698,90 @@
      capture 阶段挂可以保证在页面的其它处理之前拿到事件。 */
   document.addEventListener('drop', onDrop, true);
   document.addEventListener('paste', onPaste, true);
+
+  /* ---- 导入文件 ----------------------------------------------------------
+     文件是宿主读的（编码识别、大小上限、覆盖/追加的询问都在那边），这里只拿到
+     一段文本 + 格式 + 模式，负责把它变成正文。
+
+     · Markdown → MD.render 出来的 DOM，导入完就是渲染好的样子（代码块还会着色）
+     · TXT      → 一行一个段落，空行留空；用 textContent 写入，正文里的 < > & 不会被当成标签
+     · 源码模式 → 两种格式都原样贴进去（那本来就是纯文本编辑区），
+                  用户自己按 Ctrl+M 切回去就会渲染 */
+  function textToHtml(text) {
+    const box = document.createElement('div');
+    for (const line of text.split('\n')) {
+      const d = document.createElement('div');
+      if (line.trim() === '') d.appendChild(document.createElement('br'));
+      else d.textContent = line;
+      box.appendChild(d);
+    }
+    return box.innerHTML;
+  }
+
+  /* 削掉正文末尾连续的空白行块（<div><br></div> 这类）。只削"纯空白且没有
+     图片/表格/代码块"的块——末尾停着一张图时不能删，那是用户的内容。
+     追加导入时用它把接缝压回一个空行。 */
+  function trimTrailingBlank(root) {
+    while (root.lastElementChild) {
+      const el = root.lastElementChild;
+      if (el.tagName !== 'DIV') break;
+      if (el.textContent.trim()) break;
+      if (el.querySelector('img,pre,table,hr')) break;
+      el.remove();
+    }
+  }
+
+  function caretToEnd() {
+    const r = document.createRange();
+    r.selectNodeContents(editor);
+    r.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    editor.scrollTop = editor.scrollHeight;
+  }
+
+  function doImport(msg) {
+    const text = msg.text || '';
+    if (!text.trim()) { hint('文件里没有内容'); return; }
+    const isMd = msg.format === 'md';
+    const replace = msg.mode === 'replace';
+    hideCodeCopy();
+    closeLightbox();
+
+    if (state.mode === 'md') {
+      const cur = source.value;
+      source.value = replace ? text
+        : (cur.trim() ? cur.replace(/\s+$/, '') + '\n\n' : '') + text;
+      source.selectionStart = source.selectionEnd = source.value.length;
+      source.scrollTop = source.scrollHeight;
+    } else {
+      const html = isMd ? MD.render(text) : textToHtml(text);
+      if (replace) {
+        editor.innerHTML = html;
+      } else {
+        /* 接在末尾，中间留**一个**空段落：最后一行和导入的第一行黏在一起会
+           看起来像同一段。但原正文末尾本来就常常挂着几个空行（用户回车留下的），
+           直接再补一个就成了三四行的空隙，所以先把末尾的空块削干净。 */
+        if (editor.textContent.trim()) {
+          trimTrailingBlank(editor);
+          const sep = document.createElement('div');
+          sep.appendChild(document.createElement('br'));
+          editor.appendChild(sep);
+        }
+        editor.insertAdjacentHTML('beforeend', html);
+      }
+      paintCodes(true);
+      ensureTrailingBlock();
+      caretToEnd();
+    }
+    refreshEmpty();
+    updateCount();
+    saveNow('manual');
+    const lines = text.split('\n').length;
+    hint('已' + (replace ? '覆盖导入' : '追加导入') + ' ' + lines + ' 行'
+      + (isMd ? ' Markdown' : ' 文本'), true);
+  }
 
   /* ---- 代码块：着色 / 进出 / 语言 ---------------------------------------
      着色交给 code-hl.js（内部是本地 highlight.js）。这里只负责"什么时候画"：

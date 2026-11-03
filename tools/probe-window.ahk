@@ -1,4 +1,9 @@
 #Requires AutoHotkey v2.0
+; 警告不要弹模态框：本目录的脚本常在无人值守下跑，一个框就能把整轮测试挂死。
+; 只把"变量没赋值"（= 漏了某个 #Include）放到 stdout，其余类型丢给调试器。
+#Warn VarUnset, StdOut
+#Warn LocalSameAsGlobal, OutputDebug
+#Warn Unreachable, OutputDebug
 #ErrorStdOut UTF-8
 ; 单窗口冒烟测试：不启动托盘/热键，只建一张便签，看页面是否真的活起来。
 #Include ..\lib\json.ahk

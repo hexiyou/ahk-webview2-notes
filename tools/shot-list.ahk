@@ -1,4 +1,9 @@
 #Requires AutoHotkey v2.0
+; 警告不要弹模态框：本目录的脚本常在无人值守下跑，一个框就能把整轮测试挂死。
+; 只把"变量没赋值"（= 漏了某个 #Include）放到 stdout，其余类型丢给调试器。
+#Warn VarUnset, StdOut
+#Warn LocalSameAsGlobal, OutputDebug
+#Warn Unreachable, OutputDebug
 ; ============================================================================
 ;  shot-list.ahk —— 给 README 拍一张列表窗口的截图（写到 assets\shot-list.png）
 ;
@@ -80,6 +85,10 @@ if !w {
     App.Log("列表窗口没建起来")
     ExitApp 1
 }
+
+; 勾一条，让底部的批量条露出来 —— 多选/批量是新功能，文档截图里得看得见
+w.wv.ExecuteScript("document.querySelector('#list .item input.rowchk').click();1")
+Sleep 500
 
 pStream := 0
 DllCall("ole32\CreateStreamOnHGlobal", "ptr", 0, "int", 1, "ptr*", &pStream, "int")

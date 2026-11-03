@@ -47,6 +47,8 @@ class App {
     static FONT_MIN := 10
     static FONT_MAX := 32
     static FONT_DEFAULT := 15
+    ; 导入文件上限：便签是"一屏之内看完"的东西，塞一本小说进去只会让渲染变慢
+    static IMPORT_MAX := 4 * 1024 * 1024
 
     ; ========================================================================
     ;  启动
@@ -178,6 +180,10 @@ class App {
             SetTimer(SelfTestImage, -2500)
         if App.HasArg("--selftest-codecopy")
             SetTimer(SelfTestCodeCopy, -2500)
+        if App.HasArg("--selftest-import")
+            SetTimer(SelfTestImport, -2500)
+        if App.HasArg("--selftest-batch")
+            SetTimer(SelfTestBatch, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -360,6 +366,7 @@ class App {
             "onHotkey", NoteAskHotkey,
             "onShowAll", NoteShowAll,
             "onHideAll", NoteHideAll,
+            "onBatch", NoteBatch,
             "onDataDir", NoteDataDir,
             "onSettings", NoteShowSettings,
             "onClose", NoteListClosed)
@@ -438,6 +445,35 @@ class App {
         return res
     }
 
+    /* ---- 通用"选一个动作"对话框 -----------------------------------------------
+       用来问"覆盖还是追加"、以及批量删除的二次确认。为什么不直接用 MsgBox：
+          · MsgBox 的按钮文字是系统固定的（是/否/取消），"是"到底是覆盖还是追加
+            全靠用户读正文去猜，正是最容易搞错的地方；
+          · 无主窗口的 MsgBox 会被置顶的便签/列表盖在底下（AskText 当初就是
+            为了这个才手写的）。
+       返回值：点中的按钮下标（从 1 开始），取消/关窗返回 0。 */
+    static AskChoice(title, prompt, labels, defIdx := 0, topmost := 0) {
+        res := { idx: 0, gui: 0 }
+        g := Gui((topmost ? "+AlwaysOnTop " : "") "+ToolWindow -MinimizeBox -MaximizeBox", title)
+        g.MarginX := 16
+        g.MarginY := 14
+        g.SetFont("s10", "Microsoft YaHei UI")
+        g.Add("Text", "w360", prompt)
+        res.gui := g
+        for i, label in labels {
+            opt := (i = 1 ? "y+16 w96" : "x+8 w96")
+            if (i = defIdx)
+                opt .= " Default"
+            b := g.Add("Button", opt, label)
+            b.OnEvent("Click", ChoicePick.Bind(res, i))
+        }
+        g.OnEvent("Escape", (*) => g.Destroy())
+        g.OnEvent("Close", (*) => g.Destroy())
+        g.Show("AutoSize Center")
+        WinWaitClose("ahk_id " g.Hwnd)
+        return res.idx
+    }
+
     /* ---- 标题 ---------------------------------------------------------------
        标题默认是"正文第一行的前 60 字"自动派生的，所以以前根本没有改名字的入口。
        手动指定后 Store 会把 title_locked 置 1，之后正文怎么变都不再覆盖它；
@@ -482,6 +518,239 @@ class App {
             return
         }
         Export.Save(n, fmt)
+    }
+
+    /* 批量导出：先选一个文件夹，再逐张写。名称冲突交给 Export.SaveMany 处理。 */
+    static ExportMany(ids, fmt) {
+        notes := []
+        for id in ids {
+            n := App.Store.Get(id)
+            if n
+                notes.Push(n)
+        }
+        if !notes.Length {
+            App.Toast("没有可导出的便签")
+            return
+        }
+        Export.SaveMany(notes, fmt)
+    }
+
+    /* ---- 导入 ---------------------------------------------------------------
+       只支持 TXT / Markdown：其它格式（docx、pdf）要解析器，不属于"便签"的范围。
+       正文怎么落地交给页面做 —— rich 模式要把 Markdown 渲染成 HTML、还想让
+       光标/撤销栈正常，这些只有页面知道；宿主只负责读文件和问一句"覆盖还是追加"。 */
+    static ImportNote(id, path := "", mode := "") {
+        n := App.Store.Get(id)
+        if !n {
+            App.Toast("这张便签已经不在了")
+            return
+        }
+        if (path = "") {
+            path := FileSelect(3, "", "导入到便签"
+                , "文本与 Markdown (*.txt;*.md;*.markdown;*.mkd)")
+            if (path = "")
+                return
+        }
+        SplitPath path, &fname, , &ext
+        ext := StrLower(ext)
+        fmt := (ext = "md" || ext = "markdown" || ext = "mkd" || ext = "mdown") ? "md" : "txt"
+        try size := FileGetSize(path)
+        catch {
+            App.Toast("读不到这个文件")
+            return
+        }
+        if (size > App.IMPORT_MAX) {
+            App.Toast("文件太大了（上限 " Round(App.IMPORT_MAX / 1048576) " MB）")
+            return
+        }
+        text := App.ReadTextFile(path)
+        if (Trim(text) = "") {
+            App.Toast("这个文件是空的")
+            return
+        }
+
+        /* 便签里已经有东西才问。空便签直接放进去 —— 对着空白便签问"覆盖还是追加"
+           纯属添乱。 */
+        hasContent := (Trim(n.body_text) != "" || Trim(n.body_html) != ""
+            || Trim(n.body_md) != "")
+        if (mode = "" && hasContent) {
+            top := App.DialogTopmost(id)
+            idx := App.AskChoice("导入 " StrUpper(fmt) " 文件"
+                , "便签「" (Trim(n.title) = "" ? "（无标题）" : n.title) "」里已经有内容了。`n`n"
+                  . "· 覆盖：用文件内容替换现在的正文，原来的内容会被删掉`n"
+                  . "· 追加：把文件内容接在现有内容后面，中间空一行`n`n"
+                  . "文件：" fname, ["覆盖", "追加", "取消"], 3, top)
+            if (idx = 1)
+                mode := "replace"
+            else if (idx = 2)
+                mode := "append"
+            else
+                return
+        }
+        if (mode = "")
+            mode := "replace"
+
+        if !NoteWindow.All.Has(id) {
+            App.Toast("这张便签还没打开，先打开再导入")
+            return
+        }
+        w := NoteWindow.All[id]
+        if !w.ready {
+            App.Toast("便签还在加载，稍等一下再试")
+            return
+        }
+        w.Send('{"type":"import","text":' JsonQuote(text)
+            . ',"format":' JsonQuote(fmt) ',"mode":' JsonQuote(mode) '}')
+        App.Log("导入 " fmt " -> id=" id "，模式 " mode "，来源 " fname)
+        App.Toast("已" (mode = "replace" ? "覆盖导入" : "追加导入") "：" fname)
+    }
+
+    /* 该不该置顶的对话框。便签自己置顶、或列表窗口置顶时，普通对话框会被
+       盖在底下 —— 用户看不到自己在确认什么。 */
+    static DialogTopmost(id := 0) {
+        top := 0
+        if (id && NoteWindow.All.Has(id) && NoteWindow.All[id].note.pinned)
+            top := 1
+        if ListWindow.IsOpen() && ListWindow.Topmost
+            top := 1
+        return top
+    }
+
+    /* 读文本文件并猜编码。三种 BOM 之外，剩下的按"先当 UTF-8，出现 U+FFFD
+       就退回 CP936"处理 —— 国内用户从记事本另存的 txt 大量是 GBK，
+       直接按 UTF-8 读会整篇变成方块。 */
+    static ReadTextFile(path) {
+        b0 := 0, b1 := 0
+        try {
+            f := FileOpen(path, "r")
+            buf := Buffer(2, 0)
+            n := f.RawRead(buf, 2)
+            f.Close()
+            if (n >= 2) {
+                b0 := NumGet(buf, 0, "uchar")
+                b1 := NumGet(buf, 1, "uchar")
+            }
+        }
+        text := ""
+        if (b0 = 0xEF && b1 = 0xBB) {
+            try text := FileRead(path, "UTF-8")
+        } else if ((b0 = 0xFF && b1 = 0xFE) || (b0 = 0xFE && b1 = 0xFF)) {
+            try text := FileRead(path, "UTF-16")
+        } else {
+            try text := FileRead(path, "UTF-8")
+            if (text = "" || InStr(text, Chr(0xFFFD))) {
+                t2 := ""
+                try t2 := FileRead(path, "CP936")
+                if (t2 != "")
+                    text := t2
+            }
+        }
+        text := StrReplace(text, "`r`n", "`n")
+        return StrReplace(text, "`r", "`n")
+    }
+
+    /* ---- 批量操作 -----------------------------------------------------------
+       action：clear-hotkey / pin / hide / color / opacity / export / delete
+       一次处理一批，最后只刷一次列表和托盘（逐张刷会把列表刷成幻灯片）。
+       每个分支都同步已开的窗口："批量改颜色"改完，桌面上那张得立刻变色。 */
+    static BatchNotes(action, ids, arg := "") {
+        if !IsObject(ids) || !ids.Length
+            return 0
+        done := 0
+        switch action {
+            case "clear-hotkey":
+                for id in ids {
+                    App.Store.SetHotkey(id, "")
+                    if NoteWindow.All.Has(id)
+                        NoteWindow.All[id].note.hotkey := ""
+                    done += 1
+                }
+                App.RebindNoteHotkeys()      ; 只重绑一次，不是每张一次
+            case "pin":
+                on := arg ? 1 : 0
+                for id in ids {
+                    App.Store.SetPinned(id, on)
+                    if NoteWindow.All.Has(id)
+                        NoteWindow.All[id].ApplyPin(on)
+                    done += 1
+                }
+            case "hide":
+                want := arg ? 1 : 0
+                for id in ids {
+                    if (want) {
+                        if NoteWindow.All.Has(id)
+                            NoteWindow.All[id].Hide()
+                        else
+                            App.Store.SetHidden(id, 1)
+                    } else {
+                        /* 展开 = 真的把窗口叫回桌面，和"全部显示"同一语义。
+                           没有窗口的要建窗（OpenNote 内部会 await，本函数只在
+                           SetTimer 起的线程里被调用）。 */
+                        if NoteWindow.All.Has(id)
+                            NoteWindow.All[id].Show()
+                        else
+                            App.OpenNote(id)
+                    }
+                    done += 1
+                }
+            case "color":
+                if !NoteWindow.IsColor(arg)
+                    return 0
+                for id in ids {
+                    App.Store.SetColor(id, arg)
+                    if NoteWindow.All.Has(id)
+                        NoteWindow.All[id].ApplyColor(arg)
+                    done += 1
+                }
+            case "opacity":
+                for id in ids {
+                    App.SetNoteOpacity(id, arg)   ; 里面会判"要不要重建成分层窗口"
+                    done += 1
+                }
+            case "export":
+                App.ExportMany(ids, arg)
+                return ids.Length
+            case "delete":
+                for id in ids {
+                    if NoteWindow.All.Has(id)
+                        NoteWindow.All[id].Destroy()
+                    App.Store.Delete(id)
+                    done += 1
+                }
+                App.RebindNoteHotkeys()
+            default:
+                App.Log("未知的批量操作：" action)
+                return 0
+        }
+        App.RefreshTray()
+        App.RefreshList()
+        App.Log("批量操作 " action "：处理 " done " 张")
+        return done
+    }
+
+    /* 批量删除的二次确认。默认按钮放"取消"上 —— 回车不该把一批便签删掉。
+       返回实际删掉的张数（0 = 用户取消）。 */
+    static ConfirmBatchDelete(ids) {
+        if !IsObject(ids) || !ids.Length
+            return 0
+        list := ""
+        show := Min(ids.Length, 5)
+        for i, id in ids {
+            if (i > show)
+                break
+            n := App.Store.Get(id)
+            t := !n ? "（已不存在）" : (Trim(n.title) = "" ? "（无标题）" : n.title)
+            list .= "`n  · " (StrLen(t) > 28 ? SubStr(t, 1, 28) "…" : t)
+        }
+        if (ids.Length > show)
+            list .= "`n  · …等共 " ids.Length " 张"
+        r := App.AskChoice("批量删除"
+            , "确定要删除选中的 " ids.Length " 张便签吗？`n" list
+              . "`n`n此操作不可恢复：正文、标题、快捷键、窗口设置都会一起消失"
+              . "（图片文件仍留在数据目录里）。", ["删除", "取消"], 2, App.DialogTopmost(0))
+        if (r != 1)
+            return 0
+        return App.BatchNotes("delete", ids)
     }
 
     /* ---- 设置面板 -----------------------------------------------------------
@@ -1491,11 +1760,16 @@ SelfTestHotkey() {
     }
     App.Log("SELFTEST HK 收起后按=" shown "（期望 1），前台时按=" tog "（前台=" act "）")
 
-    ; 列表角标：两张有快捷键的便签 → 两个角标
+    ; 列表角标：数量跟着"库里 hotkey 非空"的条数走。用户的库很可能早就有
+    ; 别的便签挂着快捷键，写死 2 就永远是 FAIL。
+    wantBadges := 0
+    for n in App.Store.All()
+        if (n.hotkey != "")
+            wantBadges += 1
     App.ShowList()
     Sleep 2600
     badges := ListWindow.Win ? App.EvalNum(ListWindow.Win, "document.querySelectorAll('#list .hk').length") : -1
-    App.Log("SELFTEST HK 列表角标=" badges "（期望 2）")
+    App.Log("SELFTEST HK 列表角标=" badges "（期望 " wantBadges "）")
 
     ; 上限：库里先塞 10 个占位的（不真绑），第 11 个要被挡
     fakes := []
@@ -1516,7 +1790,8 @@ SelfTestHotkey() {
 
     ok := (e1 = "" && e2 != "" && e3 != "" && e4 != "" && e5 = ""
         && bound = 1 && same = 1 && pretty = "Ctrl+Alt+1"
-        && shown = 1 && (act ? tog = 1 : 1) && badges = 2 && e6 != "")
+        && shown = 1 && (act ? tog = 1 : 1) && badges = wantBadges && wantBadges >= 2
+        && e6 != "")
     App.Log("SELFTEST HK 结论：" (ok ? "通过" : "未通过"))
     SelfTestDone()
 }
@@ -3371,6 +3646,299 @@ SelfTestCodeCopyRun() {
         try A_Clipboard := oldClip
 }
 
+/* 自检：导入 TXT / Markdown。
+   "覆盖还是追加"平时是弹框问的，自检里没人点，所以走 ImportNote 的 mode 参数
+   直接指定 —— 这里要验的是"内容怎么落地"，不是对话框长什么样。
+   编码识别是纯函数，四种文件各来一遍：国内从记事本另存的 txt 大量是 GBK，
+   按 UTF-8 硬读会整篇变方块。 */
+SelfTestImport() {
+    global RICH_PASS := 0, RICH_FAIL := 0
+    dir := A_ScriptDir "\data\"
+    files := [], id := 0
+
+    try {
+        want := "第一行中文`n第二行 ascii`n"
+        p1 := dir "_imp_utf8bom.txt"
+        p2 := dir "_imp_utf8raw.txt"
+        p3 := dir "_imp_utf16.txt"
+        p4 := dir "_imp_gbk.txt"
+        files.Push(p1, p2, p3, p4)
+        WriteEnc(p1, "UTF-8", want)        ; 带 BOM
+        WriteEnc(p2, "UTF-8-RAW", want)    ; 不带 BOM
+        WriteEnc(p3, "UTF-16", want)       ; 带 BOM
+        WriteEnc(p4, "CP936", want)
+
+        labels := ["UTF-8 带 BOM", "UTF-8 无 BOM", "UTF-16", "GBK"]
+        ps := [p1, p2, p3, p4]
+        for i, p in ps {
+            got := App.ReadTextFile(p)
+            RichSay("编码识别：" labels[i], got = want, StrReplace(got, "`n", "¶"))
+        }
+        RichSay("换行统一成 LF", InStr(App.ReadTextFile(p3), "`r") = 0)
+
+        /* ---- 建一张便签，真往页面里导 ---------------------------------- */
+        id := App.Store.Create(Map("title", "导入测试", "body_text", "占位"))
+        w := App.OpenNote(id)
+        Loop 40 {
+            if (w && w.ready)
+                break
+            Sleep 100
+        }
+        RichSay("页面就绪", w && w.ready = 1)
+
+        App.ImportNote(id, p1, "replace")
+        Sleep 800
+        t1 := JStr(RichEval(w, "document.getElementById('editor').innerText"))
+        RichSay("TXT 覆盖：正文变成文件内容"
+            , InStr(t1, "第一行中文") > 0 && InStr(t1, "第二行 ascii") > 0, t1)
+        RichSay("覆盖把原来的内容清掉了", InStr(t1, "占位") = 0, t1)
+
+        ; ---- 追加一份 Markdown：要渲染成 HTML，且接在原文后面 ----------
+        p5 := dir "_imp_add.md"
+        files.Push(p5)
+        WriteEnc(p5, "UTF-8-RAW", "# 追加标题`n`n- 项目一`n- 项目二`n")
+        App.ImportNote(id, p5, "append")
+        Sleep 800
+        h1 := JStr(RichEval(w, "document.querySelector('#editor h1') ? 'yes' : 'no'"))
+        RichSay("追加 Markdown：渲染出 <h1>", h1 = "yes", h1)
+        both := JStr(RichEval(w, "document.getElementById('editor').innerText"))
+        RichSay("追加：新旧内容都在", InStr(both, "第一行中文") > 0 && InStr(both, "追加标题") > 0
+            , StrReplace(both, "`n", "¶"))
+        /* 接缝处必须留一个空段落，否则最后一行和标题会黏成一段；
+           但只许留**一个** —— 原正文末尾本来就挂着空行，不削就是三四行的空隙 */
+        gap := JStr(RichEval(w, "
+        ( LTrim Join
+        (function(){
+          const h = document.querySelector('#editor h1');
+          if (!h) return 'noh1';
+          let e = h.previousElementSibling, n = 0;
+          if (!e) return 'noprev';
+          while (e && e.tagName === 'DIV' && !e.textContent.trim()
+                 && !e.querySelector('img,pre,table,hr')) { n++; e = e.previousElementSibling; }
+          return n === 0 ? 'tight' : 'gap' + n;
+        })()
+        )"))
+        RichSay("追加接缝处只留一个空行", gap = "gap1", gap)
+
+        w.Cmd("save")
+        Sleep 700
+        row := App.Store.Get(id)
+        RichSay("落库的 body_html 里有渲染后的标题", InStr(row.body_html, "<h1") > 0
+            , SubStr(row.body_html, 1, 60))
+        RichSay("落库的正文含两段内容"
+            , InStr(row.body_text, "第一行中文") > 0 && InStr(row.body_text, "追加标题") > 0)
+
+        ; ---- 再覆盖一次：追加进去的标题要消失 --------------------------
+        App.ImportNote(id, p1, "replace")
+        Sleep 800
+        h1b := JStr(RichEval(w, "document.querySelector('#editor h1') ? 'yes' : 'no'"))
+        RichSay("再次覆盖：上一次追加的内容被清干净", h1b = "no", h1b)
+
+        ; ---- 空文件 / 超大文件：只是一句提示，正文不许动 ------------------
+        p6 := dir "_imp_empty.txt"
+        files.Push(p6)
+        WriteEnc(p6, "UTF-8", "   `n`n`t  ")
+        before := JStr(RichEval(w, "document.getElementById('editor').innerText"))
+        App.ImportNote(id, p6, "replace")
+        Sleep 500
+        after := JStr(RichEval(w, "document.getElementById('editor').innerText"))
+        RichSay("空文件不动正文", before = after, StrLen(after))
+
+        p7 := dir "_imp_big.txt"
+        files.Push(p7)
+        WriteEnc(p7, "UTF-8-RAW", StrReplace(Format("{:" (App.IMPORT_MAX + 10) "}", ""), " ", "a"))
+        App.ImportNote(id, p7, "replace")
+        Sleep 500
+        after2 := JStr(RichEval(w, "document.getElementById('editor').innerText"))
+        RichSay("超过 4MB 拒绝导入", after2 = before, "上限 " App.IMPORT_MAX)
+
+        ; ---- 编码猜错的兜底：GBK 文件也不能变成方块 ---------------------
+        RichSay("GBK 文件读出来是正常中文"
+            , InStr(App.ReadTextFile(p4), "第一行中文") > 0)
+
+        App.Log("SELFTEST IMPORT 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+            . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+    } catch as e {
+        App.Log("SELFTEST IMPORT 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST IMPORT 结论：未通过（异常中断）")
+    } finally {
+        for p in files
+            try FileDelete p
+        if (id)
+            try App.DeleteNote(id)
+        SelfTestDone()
+    }
+}
+
+/* 写一个指定编码的文件。FileOpen 的 "UTF-8" 带 BOM、"UTF-8-RAW" 不带，
+   自检要的是"两种都认"，所以得分开写。 */
+WriteEnc(path, enc, text) {
+    fh := FileOpen(path, "w", enc)
+    try fh.Write(text)
+    finally fh.Close()
+}
+
+/* 挑一个当前没被占用的热键，专给自检用。用户的库里很可能早就把 ^!1 之类的
+   键分给了某些便签（这是正常使用状态），自检写死具体键就会误报冲突。
+   exclude 用来排除已经挑走的那个：两张便签不能挂同一个键。
+   优先 F 键 —— 不占主键区，也不容易和用户的全局热键碰上。 */
+TestPickFreeHotkey(exclude := "") {
+    for cand in ["^!F9", "^!F10", "^!F11", "^!F12", "^!7", "^!6", "^!5", "^!4"] {
+        if (exclude != "" && App.SameHotkey(cand, exclude))
+            continue
+        free := true
+        for name, k in App.CfgHotkeys() {
+            if (k != "" && App.SameHotkey(k, cand)) {
+                free := false
+                break
+            }
+        }
+        if (free) {
+            for n in App.Store.All() {
+                if (n.hotkey != "" && App.SameHotkey(n.hotkey, cand)) {
+                    free := false
+                    break
+                }
+            }
+        }
+        if (free)
+            return cand
+    }
+    return ""
+}
+
+/* 自检：批量操作。
+   批量删除的二次确认在 ConfirmBatchDelete 里弹框，自检没人点它，所以这里
+   直接验 BatchNotes 本体（删除分支也在里面）。重点是"库改了 + 已经开着的
+   窗口同步改了"，只查库会漏掉 Apply* 那一半。 */
+SelfTestBatch() {
+    global RICH_PASS := 0, RICH_FAIL := 0
+    ids := [], id1 := 0, w1 := 0
+
+    try {
+        id1 := App.Store.Create(Map("title", "批量甲", "body_text", "甲"))
+        id2 := App.Store.Create(Map("title", "批量乙", "body_text", "乙"))
+        id3 := App.Store.Create(Map("title", "批量丙", "body_text", "丙"))
+        ids.Push(id1, id2, id3)
+
+        w1 := App.OpenNote(id1)
+        Loop 40 {
+            if (w1 && w1.ready)
+                break
+            Sleep 100
+        }
+        RichSay("页面就绪", w1 && w1.ready = 1)
+
+        ; ---- 1. 批量清空快捷键 -----------------------------------------
+        /* 键要现挑：用户的库里很可能早就把 ^!1 给了某张便签，直接写死会让
+           自检报"这个键已经给了便签"——那是正常状态，不是缺陷。 */
+        hkA := TestPickFreeHotkey()
+        hkB := TestPickFreeHotkey(hkA)
+        RichSay("挑到两个空闲键", hkA != "" && hkB != "", hkA " / " hkB)
+
+        e1 := App.SetNoteHotkey(id1, hkA)
+        e2 := App.SetNoteHotkey(id2, hkB)
+        RichSay("两张各挂一个快捷键"
+            , e1 = "" && e2 = "" && App.Store.Get(id1).hotkey != ""
+              && App.Store.Get(id2).hotkey != ""
+            , (e1 = "" ? "ok" : e1) " / " (e2 = "" ? "ok" : e2))
+        n := App.BatchNotes("clear-hotkey", ids)
+        RichSay("批量清空：三张都空了", n = 3 && App.Store.Get(id1).hotkey = ""
+            && App.Store.Get(id2).hotkey = "" && App.Store.Get(id3).hotkey = "", n)
+        /* 清空之后键要真的还回来 —— 只把库字段抹掉、热键还占着的话，
+           用户会在设置面板里撞"这个键已经给了便签"的假冲突。
+           App.NoteKeys 是"当前真绑定着"的那份账，库字段清空后它也该清空。 */
+        RichSay("清空后不再占着键"
+            , !App.NoteKeys.Has(id1) && !App.NoteKeys.Has(id2), App.NoteKeys.Count)
+
+        ; ---- 2. 置顶 ----------------------------------------------------
+        n := App.BatchNotes("pin", ids, 1)
+        Sleep 300
+        top := (WinGetExStyle("ahk_id " w1.gui.Hwnd) & 0x8) ? 1 : 0
+        RichSay("批量置顶：库里三张都置顶"
+            , App.Store.Get(id1).pinned = 1 && App.Store.Get(id3).pinned = 1, n)
+        RichSay("批量置顶：开着的窗口真的到了最前", top = 1, top)
+
+        App.BatchNotes("pin", ids, 0)
+        Sleep 300
+        top0 := (WinGetExStyle("ahk_id " w1.gui.Hwnd) & 0x8) ? 1 : 0
+        RichSay("批量取消置顶", App.Store.Get(id1).pinned = 0 && top0 = 0, top0)
+
+        ; ---- 3. 颜色 ----------------------------------------------------
+        App.BatchNotes("color", ids, "green")
+        Sleep 300
+        pc := JStr(RichEval(w1, "document.body.dataset.color"))
+        RichSay("批量改颜色：库里都变绿"
+            , App.Store.Get(id1).color = "green" && App.Store.Get(id3).color = "green"
+            , App.Store.Get(id1).color)
+        RichSay("批量改颜色：页面跟着变", pc = "green", pc)
+
+        ; ---- 4. 收起 / 展开 ---------------------------------------------
+        App.BatchNotes("hide", ids, 1)
+        Sleep 500
+        vis := DllCall("IsWindowVisible", "ptr", w1.gui.Hwnd) ? 1 : 0
+        RichSay("批量收起：库里 hidden=1", App.Store.Get(id1).hidden = 1
+            && App.Store.Get(id3).hidden = 1)
+        RichSay("批量收起：窗口真的藏起来了", vis = 0, vis)
+
+        App.BatchNotes("hide", ids, 0)
+        Sleep 3000                       ; 没窗口的那两张要现建，慢
+        vis2 := DllCall("IsWindowVisible", "ptr", w1.gui.Hwnd) ? 1 : 0
+        RichSay("批量展开：库里 hidden=0", App.Store.Get(id1).hidden = 0)
+        RichSay("批量展开：窗口回到桌面", vis2 = 1, vis2)
+
+        /* 透明度放最后：不透明外观下改透明度会重建窗口，w1 那个对象会失效，
+           前面的断言就没法再用它了。 */
+        cur := NoteWindow.All.Has(id1) ? NoteWindow.All[id1] : 0
+        App.BatchNotes("opacity", ids, 55)
+        Sleep 600
+        cur := NoteWindow.All.Has(id1) ? NoteWindow.All[id1] : 0
+        pv := cur ? App.EvalNum(cur, "Math.round(parseFloat(getComputedStyle(document.documentElement).opacity||'1')*100)") : -1
+        RichSay("批量透明度：库 55", App.Store.Get(id1).opacity = 55
+            && App.Store.Get(id3).opacity = 55, App.Store.Get(id1).opacity)
+        RichSay("批量透明度：页面 55", pv = 55, pv)
+
+        ; ---- 5. 删除 ----------------------------------------------------
+        n := App.BatchNotes("delete", ids)
+        gone := 0
+        for i in ids
+            if !App.Store.Get(i)
+                gone += 1
+        RichSay("批量删除：三张都从库里消失", n = 3 && gone = 3, gone)
+        RichSay("批量删除：窗口也关了", !NoteWindow.All.Has(id1) && !NoteWindow.All.Has(id3))
+
+        /* ---- 6. 批量导出的重名处理（纯函数，不弹框） -------------------- */
+        ed := A_ScriptDir "\data\_batch_exp\"
+        try DirCreate ed
+        used := Map()
+        a1 := Export.UniquePath(ed, "同名", "md", used)
+        a2 := Export.UniquePath(ed, "同名", "md", used)
+        a3 := Export.UniquePath(ed, "同名", "md", used)
+        RichSay("重名自动加序号（2）(3）"
+            , a1 != a2 && a2 != a3 && InStr(a2, "(2)") > 0 && InStr(a3, "(3)") > 0, a2)
+        WriteEnc(a1, "UTF-8-RAW", "x")
+        b1 := Export.UniquePath(ed, "同名", "md", Map())
+        RichSay("目标目录里已有同名文件时也不覆盖", b1 != a1 && InStr(b1, "(2)") > 0, b1)
+        ; 大小写：Windows 的文件系统不区分，同一批里 Case.md 和 case.md 是同一个文件。
+        ; AHK 的 = 默认不区分大小写，这里要区分地比（StrCompare 第三个参数）。
+        used3 := Map()
+        c1 := Export.UniquePath(ed, "Case", "md", used3)
+        c2 := Export.UniquePath(ed, "case", "md", used3)
+        RichSay("大小写不同也算重名（Windows 规则）", StrCompare(c1, c2, true) != 0, c2)
+        try DirDelete ed, true
+
+        App.Log("SELFTEST BATCH 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+            . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+    } catch as e {
+        App.Log("SELFTEST BATCH 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST BATCH 结论：未通过（异常中断）")
+    } finally {
+        for i in ids
+            try App.DeleteNote(i)
+        SelfTestDone()
+    }
+}
+
 /* 通用流程：塞文字 → 全选 → 点按钮 → 看 DOM 与 Markdown。
    全选后要等一帧，selectionchange 才会把选区记进页面的 savedRange。 */
 RichStyle(w, cmd, tag, wantMd, label) {
@@ -3428,6 +3996,19 @@ NoteSetOpacity(id, pct) => App.SetNoteOpacity(id, pct)
 NoteAskHotkey(id) => App.AskNoteHotkey(id)
 NoteShowAll() => App.ShowAll()
 NoteHideAll() => App.HideAll()
+/* 列表的批量操作（清快捷键 / 置顶 / 收起展开 / 颜色 / 透明度 / 导出 / 删除）。
+   删除的二次确认在这里做：页面只说"要删这些"，删不删由宿主问。 */
+NoteBatch(action, ids, arg := "") {
+    if (action = "delete")
+        return App.ConfirmBatchDelete(ids)
+    return App.BatchNotes(action, ids, arg)
+}
+/* App.AskChoice 的按钮回调：记下点了第几个再关窗。
+   Bind 把 res 和下标一起带过来，多出来的事件参数用 * 吃掉。 */
+ChoicePick(res, idx, *) {
+    res.idx := idx
+    try res.gui.Destroy()
+}
 NoteDataDir() => App.OpenDataDir()
 NoteOpenLog() => App.OpenLog()
 NoteListClosed() => App.RefreshTray()

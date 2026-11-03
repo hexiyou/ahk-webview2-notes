@@ -1,4 +1,9 @@
 #Requires AutoHotkey v2.0
+; 警告不要弹模态框：本目录的脚本常在无人值守下跑，一个框就能把整轮测试挂死。
+; 只把"变量没赋值"（= 漏了某个 #Include）放到 stdout，其余类型丢给调试器。
+#Warn VarUnset, StdOut
+#Warn LocalSameAsGlobal, OutputDebug
+#Warn Unreachable, OutputDebug
 #ErrorStdOut UTF-8
 #Include ..\lib\json.ahk
 #Include ..\lib\sqlite.ahk
@@ -42,6 +47,31 @@ Check(name, cond, detail := "") {
     }
 }
 
+; "3,2,1" -> "1,2,3"。批量操作的断言只关心集合，不关心顺序。
+SortedIds(csv) {
+    out := []
+    for part in StrSplit(csv, ",") {
+        p := Trim(part)
+        if (p != "")
+            out.Push(Integer(p))
+    }
+    ; 元素不多（测试里最多三条），冒泡足够，不引排序库
+    loop out.Length {
+        i := A_Index
+        loop out.Length - i {
+            if (out[A_Index] > out[A_Index + 1]) {
+                t := out[A_Index]
+                out[A_Index] := out[A_Index + 1]
+                out[A_Index + 1] := t
+            }
+        }
+    }
+    s := ""
+    for v in out
+        s .= (s = "" ? "" : ",") v
+    return s
+}
+
 if FileExist(App.LogPath)
     FileDelete App.LogPath
 try DllCall("user32\SetProcessDpiAwarenessContext", "ptr", -4)
@@ -72,6 +102,7 @@ ListWindow.Hooks := Map(
     "onOpen", NoteHookOpen,
     "onDelete", NoteHookDelete,
     "onHide", NoteHookHide,
+    "onBatch", NoteHookBatch,
     "onClose", NoteHookClose)
 NoteHookNew() => App.Log("hook:new")
 NoteHookClose() => App.Log("hook:close")
@@ -82,6 +113,20 @@ NoteHookOpen(id) {
 }
 NoteHookDelete(id) => App.Log("hook:delete " id)
 NoteHookHide(id) => App.Log("hook:hide " id)
+
+; 批量操作钩子：页面点批量按钮 → onBatch(action, ids, arg)。
+; ids 拼成 "1,2" 方便断言，顺便确认参数顺序没接错。
+batchAction := "", batchIds := "", batchArg := ""
+NoteHookBatch(action, ids, arg := "") {
+    global batchAction, batchIds, batchArg
+    batchAction := action
+    s := ""
+    for i, id in ids
+        s .= (i > 1 ? "," : "") id
+    batchIds := s
+    batchArg := arg
+    App.Log("hook:batch " action " [" s "] arg=" arg)
+}
 
 ListWindow.Open()
 App.Log("Open 返回，Win=" (ListWindow.Win ? "ok" : "null"))
@@ -155,6 +200,108 @@ Check("再点一次取消置顶", (WinGetExStyle("ahk_id " hwnd) & 0x8) = 0
     , WinGetExStyle("ahk_id " hwnd))
 on2 := ListWindow.Win.wv.ExecuteScript("document.getElementById('btnPin').classList.contains('on')")
 Check("按钮跟着熄掉", on2 = "false", on2)
+
+; ---- 排序：控件在、点了能改宿主状态、列表顺序真的跟着变 -------------------
+optN := ListWindow.Win.wv.ExecuteScript(
+    "document.querySelectorAll('#sortSel option').length")
+Check("排序下拉有 7 个选项", optN = "7", optN)
+
+; 标题升序：买菜(1) < 工作周报(2) < 已收起的(3)（按码位）
+ListWindow.Win.wv.ExecuteScript(
+    "var s=document.getElementById('sortSel');s.value='title:asc';"
+    . "s.dispatchEvent(new Event('change'));1")
+Sleep 500
+Check("页面改排序 → 宿主记下了", ListWindow.SortKey = "title" && ListWindow.SortDesc = 0
+    , ListWindow.SortKey " / " ListWindow.SortDesc)
+names := ListWindow.Win.wv.ExecuteScript(
+    "Array.from(document.querySelectorAll('#list .item .name')).map(e=>e.textContent).join('|')")
+Check("标题升序生效", InStr(names, "买菜") > 0 && InStr(names, "买菜") < InStr(names, "工作周报")
+    , names)
+Check("排序写进了配置", InStr(App.Cfg("window", "listSort", ""), "title:asc") > 0
+    , App.Cfg("window", "listSort", ""))
+
+ListWindow.Win.wv.ExecuteScript(
+    "var s=document.getElementById('sortSel');s.value='title:desc';"
+    . "s.dispatchEvent(new Event('change'));1")
+Sleep 500
+Check("标题倒序生效", ListWindow.SortDesc = 1, ListWindow.SortDesc)
+
+; ---- 过滤：条件生效 + 徽标数字 + 清空 -------------------------------------
+ListWindow.ApplyFilter("shown", 0)     ; 只看已收起的
+Sleep 400
+cntF := ListWindow.Win.wv.ExecuteScript("document.querySelectorAll('#list .item').length")
+Check("过滤『已收起』只剩 1 条", cntF = "1", cntF)
+badge := ListWindow.Win.wv.ExecuteScript("document.getElementById('fCount').textContent")
+Check("过滤徽标显示 1", badge = '"1"', badge)
+clearShown := ListWindow.Win.wv.ExecuteScript(
+    "document.getElementById('btnClearFilter').hidden")
+Check("『清空』按钮露出来了", clearShown = "false", clearShown)
+Check("过滤条件写进了配置", InStr(App.Cfg("window", "listFilter", ""), "shown=0") > 0
+    , App.Cfg("window", "listFilter", ""))
+
+ListWindow.ApplyClearFilter()
+Sleep 400
+cntF2 := ListWindow.Win.wv.ExecuteScript("document.querySelectorAll('#list .item').length")
+Check("清空过滤恢复 3 条", cntF2 = "3", cntF2)
+badge2 := ListWindow.Win.wv.ExecuteScript("document.getElementById('fCount').hidden")
+Check("徽标跟着藏起来", badge2 = "true", badge2)
+/* 光看 hidden 属性不够：.fcount 有 display:inline-grid，类选择器会盖掉浏览器
+   默认的 [hidden]{display:none}，属性是 true、屏幕上照样显示一个"0"。
+   所以要看计算样式。 */
+badgeCss := ListWindow.Win.wv.ExecuteScript(
+    "getComputedStyle(document.getElementById('fCount')).display")
+Check("徽标真的不占位（计算样式 display=none）", badgeCss = '"none"', badgeCss)
+clearCss := ListWindow.Win.wv.ExecuteScript(
+    "getComputedStyle(document.getElementById('btnClearFilter')).display")
+Check("「清空」也真的不占位", clearCss = '"none"', clearCss)
+
+; ---- 勾选 / 全选 / 批量条 -------------------------------------------------
+chkN := ListWindow.Win.wv.ExecuteScript(
+    "document.querySelectorAll('#list .item input.rowchk').length")
+Check("每行都有复选框", chkN = "3", chkN)
+
+ListWindow.Win.wv.ExecuteScript(
+    "document.querySelectorAll('#list .item input.rowchk')[0].click();1")
+Sleep 300
+sel1 := ListWindow.Win.wv.ExecuteScript("document.getElementById('selN').textContent")
+Check("勾一条 → 已选 1", sel1 = '"1"', sel1)
+barShown := ListWindow.Win.wv.ExecuteScript("document.getElementById('selbar').hidden")
+Check("批量条出现了", barShown = "false", barShown)
+
+ListWindow.Win.wv.ExecuteScript("document.getElementById('chkAll').click();1")
+Sleep 300
+selAll := ListWindow.Win.wv.ExecuteScript("document.getElementById('selN').textContent")
+Check("全选 → 已选 3", selAll = '"3"', selAll)
+pinLabel := ListWindow.Win.wv.ExecuteScript("document.getElementById('actPin').textContent")
+Check("选中项里有没置顶的 → 按钮显示『置顶』", pinLabel = '"置顶"', pinLabel)
+
+; 批量置顶：页面发 batch，宿主 → 钩子。参数顺序 action, ids, on
+batchAction := ""
+ListWindow.Win.wv.ExecuteScript("document.getElementById('actPin').click();1")
+Sleep 500
+Check("批量置顶回调 action", batchAction = "pin", batchAction)
+; id 的顺序跟着当前列表顺序走（这时是按标题倒序，所以是 3,2,1）。
+; 批量操作的语义和顺序无关，断言只该比集合。
+Check("批量置顶带回 3 个 id", SortedIds(batchIds) = "1,2,3", batchIds)
+Check("批量置顶 on=1", batchArg = 1, batchArg)
+
+; 清空选择后只剩一张被勾选，删除按钮走的是同一条路（二次确认在真实 App 里）
+ListWindow.Win.wv.ExecuteScript("document.getElementById('btnSelClear').click();1")
+Sleep 300
+sel0 := ListWindow.Win.wv.ExecuteScript("document.getElementById('selN').textContent")
+Check("清除选择回到 0", sel0 = '"0"', sel0)
+barHidden := ListWindow.Win.wv.ExecuteScript("document.getElementById('selbar').hidden")
+Check("批量条收起来", barHidden = "true", barHidden)
+
+; 批量菜单（颜色/透明度/导出）走 batch-menu，宿主弹原生菜单，不进钩子
+ListWindow.Win.wv.ExecuteScript(
+    "document.querySelectorAll('#list .item input.rowchk')[1].click();1")
+Sleep 300
+ListWindow.Win.wv.ExecuteScript(
+    "document.querySelector('.selacts button[data-act=delete]').click();1")
+Sleep 500
+Check("批量删除也走 onBatch(delete)", batchAction = "delete", batchAction)
+Check("删除只带被勾的那一条", batchIds = "2", batchIds)
 
 ListWindow.Close()
 Sleep 300

@@ -1,4 +1,9 @@
 #Requires AutoHotkey v2.0
+; 本文件用了 clip.ahk 的 Clip.SetText / Clip.SetImageFile。依赖写在这里、
+; 而不是指望调用方记得带上：漏了的话 AHK 会在加载阶段弹"变量用不到"的模态框，
+; 无人值守跑测试时就永久卡住（probe-list 就踩过）。#Include 是 include-once，
+; 调用方重复 include 不会出问题。
+#Include clip.ahk
 ; ============================================================================
 ;  note-window.ahk —— 一张便签 = 一个 Gui + 一个 WebView2
 ;
@@ -633,6 +638,9 @@ class NoteWindow {
         em.Add("网页  (*.html)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "html")))
         em.Add("RTF 文档 (*.rtf)", NoteWindow.MB(ObjBindMethod(this, "ExportAs", "rtf")))
         m.Add("导出", em)
+        /* 导入只收 TXT / Markdown：docx、pdf 要解析器，不属于"便签"的范畴。
+           有这个入口之后，"把一段笔记从别处搬进来"就不用再复制粘贴了。 */
+        m.Add("导入文件…（TXT / Markdown）", NoteWindow.MB(ObjBindMethod(this, "Import")))
 
         m.Add()
         m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
@@ -842,6 +850,12 @@ class NoteWindow {
        "未赋值的变量"，然后弹个模态框把自动化测试卡死。 */
     ExportAs(fmt) {
         App.ExportNote(this.id, fmt)
+    }
+
+    /* 导入：选文件、问"覆盖还是追加"都在主程序那边（App.ImportNote），
+       这里只管转发 —— 它要弹两个对话框，不能在菜单回调里就地做。 */
+    Import() {
+        App.ImportNote(this.id)
     }
 
     /* ---- 插入图片 -----------------------------------------------------------

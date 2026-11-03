@@ -118,6 +118,20 @@ JsonStrArray(text, key) {
     return out
 }
 
+/* 纯数字数组，如 "ids":[3,7,12]。批量操作要用。
+   只认整数：id 就是整数，浮点/字符串一律跳过（宁可少删一个，也别删错一个）。 */
+JsonNumArray(text, key) {
+    out := []
+    if !RegExMatch(text, '"' key '"\s*:\s*\[([^\]]*)\]', &arr)
+        return out
+    pos := 1
+    while RegExMatch(arr[1], "-?\d+", &m, pos) {
+        out.Push(m[0] + 0)
+        pos := m.Pos + m.Len
+    }
+    return out
+}
+
 JsonUnescape(s) {
     if !InStr(s, '\')
         return s
