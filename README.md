@@ -61,7 +61,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 便签快捷键 | 最多 10 张便签各挂一个全局热键，一键呼到最前（再按收起），列表里带角标；没有设的便签行为不变 |
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
 | 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用、链接、代码块、分割线 |
-| 代码着色 | 代码块自动上色（本地 highlight.js，离线可用）；右键「代码语言」可手动指定，导出 HTML 也带着颜色 |
+| 代码着色 | 代码块自动上色（本地 highlight.js，离线可用）；右键「代码语言」可手动指定，语言跟着块走 —— 可视化 ⇄ Markdown 源码来回切、反复重画都不丢；导出 HTML 也带着颜色 |
 | **代码一键复制** | 鼠标移到代码块上，右上角浮出「复制」按钮，点一下整段代码进剪贴板（换行是 CRLF，粘进记事本也是一行一行）；右键菜单里也有「复制这段代码」，按钮被滚走时用它 |
 | 三套右键菜单 | 正文里是**编辑菜单**（撤销/剪切/复制/粘贴/全选/清除格式），图片上是**图片菜单**（复制图片/另存为/删除），标题栏和其它地方是**便签菜单**（置顶/颜色/导出/删除…） |
 | 插入图片 | 拖文件进来 / `Ctrl+V` 粘截图 / 右键「插入图片…」；图片存 `data\images`，正文只留链接 |
@@ -383,6 +383,11 @@ WebView2 的合成确实会有差异，这时才需要退回不透明。
 - **复制出去的图是 24 位白底位图**：剪贴板里同时写了 PNG 格式（Chromium、Office 会优先读它，
   透明保得住），但只认 `CF_DIB` 的老程序拿到的是白底版本 —— 这是 Windows 剪贴板的通病。
 - **代码块正在编辑时不上色**：为了不跳光标，正在打字的那个块保持素色，光标一移开立刻上色。
+- **修复前存过的代码块，语言可能已经丢了**：旧版着色会把渲染时写下的
+  `<code class="language-x">` 冲掉，而库里存的就是着色后的 HTML —— 那批块里已经没有任何
+  语言信息（`body_md` 也是从 HTML 反推的，一并丢了）。这属于信息已经不存在，升级不会
+  自动恢复；在可视化里右键「代码语言」重新指定一次即可，**此后**无论怎么切换视图、
+  重复着色都不会再丢（见实现笔记 92）。
 - **导入只认 TXT / Markdown**：docx、pdf 要解析器，不属于"便签"的范围；图片也不会跟着进来
   （Markdown 里的 `![](本地路径)` 会变成裂图，需要的话拖进来重新插图）。
 - **过滤"含图片/含代码块"是看正文 HTML**：查的是 `body_html` 里有没有 `<img` / `<pre`，
@@ -423,7 +428,7 @@ wv2-notes/
 │  ├─ list.html/css/js   列表页面
 │  ├─ settings.html/css/js 设置面板页面
 │  ├─ md.js              Markdown ⇄ HTML（纯函数，可单测）
-│  ├─ code-hl.js         代码着色（管"什么时候可以重画"，见实现笔记 40）
+│  ├─ code-hl.js         代码着色（管"什么时候可以重画"、语言存哪，见笔记 40 / 92）
 │  └─ vendor/            highlight.js 11.9.0 + github 主题（BSD-3-Clause，本地不放 CDN）
 ├─ assets/note.ico       图标
 ├─ runtime/              自带的 AutoHotkey 运行时
@@ -499,6 +504,12 @@ runtime\AutoHotkey64.exe note.ahk --selftest-image
 #              「已复制」回执 + 移开收起 + 重新着色后仍可用 + 右键菜单入口 +
 #              不污染落库的 HTML；19 项断言）
 runtime\AutoHotkey64.exe note.ahk --selftest-codecopy
+
+# 程序级自检：代码块的语言标记在「可视化 ⇄ Markdown 源码」往返中不丢
+#              （源码里给围栏标 python → 可视化 + 重画后仍是 python → 菜单改语言 →
+#               切回源码围栏还在 → 选「纯文本」→ 在 <code> 里回车/输入不粘行 →
+#               落库的 HTML 带 language-x；18 项断言）
+runtime\AutoHotkey64.exe note.ahk --selftest-codelang
 
 # 程序级自检：导入（UTF-8 BOM/无 BOM/UTF-16/GBK 四种编码识别 + TXT 覆盖 +
 #              Markdown 追加渲染 + 接缝只留一个空行 + 空文件/超 4MB 被挡；17 项断言）
@@ -832,6 +843,8 @@ pwsh -File tools/make-icon.ps1
       但用户按回车时 Chromium 爱插 `<br>`，所以读文本要走 `preText()`，
       把 `<br>` 折成 `\n` —— 直接用 `textContent` 会把两行粘成一行，
       导出的 Markdown 就毁了。
+    重画的落点是 `<code>`（没有就落在 `<pre>` 上），语言另存在 `pre[data-lang]`，
+    原因见笔记 92。
 
 41. **代码块的"出得去"和"进得来"是两件事，别用同一条判据。** 第一版只看"光标后面
     到块尾全是空白"就跳出去 —— 可块末尾正常敲回车想加第二行时，光标后面本来就是空的，
@@ -1053,7 +1066,7 @@ pwsh -File tools/make-icon.ps1
     顺便记一下：菜单项回调要套 `MB()`（笔记 44）、菜单只能在独立线程里 `Show`。
 
 70. **代码块上的悬浮按钮不能住在 `<pre>` 或 `#editor` 里。** 两个方向都会坏：
-    放进 `<pre>` —— `CodeHL.paint()` 是直接换 `innerHTML`，按钮会被整块冲掉；而且
+    放进 `<pre>` —— `CodeHL.paint()` 会换掉 `<code>` 的 innerHTML，按钮会被整块冲掉；而且
     `textOf()` 会把按钮上"复制"两个字算进代码，复制/导出全带上它。
     放进 `#editor` —— `snapshot()` 取的就是 `editor.innerHTML`，按钮会被当成正文存进库，
     重新打开便签凭空多出一个按钮。
@@ -1208,3 +1221,20 @@ pwsh -File tools/make-icon.ps1
     逐个比），要么就别用字符串函数。顺带：A4 的 MediaBox 是
     `[0 0 594.95996 841.91998`，8.27 英寸换算过来带浮点尾巴，断言只能比前缀
     `/MediaBox [0 0 59`（Letter 是 612，一撞就分得开）。
+
+92. **代码块的语言必须同时挂在 `<pre>` 上，不能只靠 `<code class="language-x">`。**
+    highlight.js 的输出是**一串 span，没有 `<code>`**，而 `paint()` 早先写的是
+    `pre.innerHTML = html` —— 于是渲染时那个 `<code>` 在第一次上色后就没了。
+    `toMarkdown()` 当时又只从 `code.className` 读 language-x，两条路一齐断在
+    这个看不见的节点上：屏幕上看着还对（`pre` 上留着 `data-hl`），一切换视图
+    语言就变回没有语言的围栏，再切回来高亮也没了。
+    现在的规则是：
+    · `paint()` 只换 `<code>` 的 innerHTML（没有 `<code>` 的老数据保持原样，
+      不凭空加节点 —— contenteditable 的节点结构一变，回车和粘贴的行为就跟着变）；
+    · 每次上色都把语言写进 `pre[data-lang]`，它是唯一活得比 DOM 重绘更久的载体；
+    · `toMarkdown()` 按 `code.language-x` → `code[data-lang]` → `pre[data-lang]`
+      依次回退，三处都认；
+    · `detect()` 本来就 `pre[data-lang]` 优先，右键菜单的勾选因此也稳了
+      （以前重画一次，"代码语言"里的勾会跳回「自动识别」）。
+    顺带一句：`language-text` 不是标准语言名，选「纯文本」时只写 `data-lang`，
+    所以回退顺序里必须有 `data-lang` 那一档，否则选纯文本的块切回源码就丢标记。

@@ -191,6 +191,8 @@ class App {
             SetTimer(SelfTestImage, -2500)
         if App.HasArg("--selftest-codecopy")
             SetTimer(SelfTestCodeCopy, -2500)
+        if App.HasArg("--selftest-codelang")
+            SetTimer(SelfTestCodeLang, -2500)
         if App.HasArg("--selftest-import")
             SetTimer(SelfTestImport, -2500)
         if App.HasArg("--selftest-batch")
@@ -3886,6 +3888,195 @@ SelfTestCodeCopyRun() {
     App.DeleteNote(id)
     if (oldClip != "")
         try A_Clipboard := oldClip
+}
+
+/* 自检：代码块的语言标记在「可视化 ⇄ Markdown 源码」往返中不能丢。
+
+   ★ 这条 bug 的根因记一笔：CodeHL.paint() 是 `pre.innerHTML = 高亮后的 HTML`，
+     而 highlight.js 的输出里**没有 <code>** —— 渲染时那个
+     `<code class="language-python">` 在第一次上色时就被整块冲掉了。
+     MD.toMarkdown() 又偏偏只从 code.className 里读 language-x，于是两条路
+     一齐断在这个看不见的节点上：屏幕上看还是对的（pre 上留着 data-hl），
+     一往返就变回没有语言的 ```。
+
+   所以这里验的不只是"最终显示对不对"，而是四层信息在每次重画后都还在：
+     ① 页面读得到的语言（右键菜单的勾选靠它）
+     ② <code> 节点还在（language-x 的载体，导出的通行写法）
+     ③ pre 的 data-lang（没有 <code> 时的兜底）
+     ④ Markdown 源码里的围栏语言 */
+SelfTestCodeLang() {
+    try SelfTestCodeLangRun()
+    catch as e {
+        App.Log("SELFTEST CODELANG 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST CODELANG 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestCodeLangRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    F := Chr(96) Chr(96) Chr(96)          ; Markdown 的围栏，三个反引号
+
+    id := App.Store.Create(Map("title", "语言标记测试", "body_text", "x"))
+    w := App.OpenNote(id)
+    if !w {
+        App.Log("SELFTEST CODELANG 没能打开便签")
+        return
+    }
+    Loop 40 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("页面就绪", w.ready = 1, w.ready)
+
+    RichEval(w, "
+    ( LTrim Join
+    window.__l = {
+      mdBtn: () => document.getElementById('btnMd'),
+      pre: () => document.querySelector('#editor pre'),
+      isMd: () => document.getElementById('btnMd').classList.contains('active') ? 1 : 0,
+      lang: () => {
+        const p = window.__l.pre();
+        return p ? (window.CodeHL.detect(p) || '-') : 'nopre';
+      },
+      hasCode: () => {
+        const p = window.__l.pre();
+        return p && p.querySelector('code') ? 1 : 0;
+      },
+      cls: () => {
+        const p = window.__l.pre();
+        const c = p && p.querySelector('code');
+        return c ? (c.className || 'noclass') : 'nocode';
+      },
+      preLang: () => {
+        const p = window.__l.pre();
+        return p ? (p.getAttribute('data-lang') || '-') : 'nopre';
+      },
+      text: () => {
+        const p = window.__l.pre();
+        return p ? window.CodeHL.textOf(p) : 'nopre';
+      },
+      paintAll: () => window.CodeHL.paintAll(document.getElementById('editor'), { force: true }),
+      setLang: (l) => {
+        const p = window.__l.pre();
+        window.CodeHL.setLang(p, l);
+        window.CodeHL.paint(p);
+      },
+      mdText: () => document.getElementById('source').value,
+      insertLine: (kind) => {
+        const p = window.__l.pre();
+        const c = p.querySelector('code') || p;
+        const r = document.createRange();
+        r.selectNodeContents(c);
+        r.collapse(false);
+        const s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+        document.execCommand(kind || 'insertLineBreak');
+        return window.CodeHL.textOf(p);
+      },
+      typeInto: (t) => {
+        document.execCommand('insertText', false, t);
+        return window.CodeHL.textOf(window.__l.pre());
+      },
+      html: () => window.__l.pre().innerHTML.slice(0, 120),
+      writeMd: (md) => {
+        if (!window.__l.isMd()) window.__l.mdBtn().click();
+        document.getElementById('source').value = md;
+        window.__l.mdBtn().click();
+      }
+    };
+    1;
+    )")
+
+    /* ---- 1. Markdown 源码里写了 python → 切到可视化 ---------------------- */
+    RichEval(w, "__l.writeMd(String.fromCharCode(96,96,96) + 'python\nprint(1)\n' + String.fromCharCode(96,96,96));1")
+    Sleep 300
+    RichSay("源码写 " F "python → 可视化后语言还是 python"
+        , JStr(RichEval(w, "__l.lang()")) = "python", JStr(RichEval(w, "__l.lang()")))
+    RichSay("可视化后 <pre> 里还留着 <code>（language-x 的载体）"
+        , Trim(JStr(RichEval(w, "__l.hasCode()"))) = "1", JStr(RichEval(w, "__l.cls()")))
+    RichSay("<code> 上带着 language-python"
+        , InStr(JStr(RichEval(w, "__l.cls()")), "language-python") > 0, JStr(RichEval(w, "__l.cls()")))
+    RichSay("代码正文没被着色改动", JStr(RichEval(w, "__l.text()")) = "print(1)"
+        , JStr(RichEval(w, "__l.text()")))
+
+    /* ---- 2. 再画一次（失焦、光标离开都会重画），语言不能漂 ------------- */
+    RichEval(w, "__l.paintAll();1")
+    Sleep 200
+    RichSay("重画一遍之后语言还是 python"
+        , JStr(RichEval(w, "__l.lang()")) = "python", JStr(RichEval(w, "__l.lang()")))
+    RichEval(w, "__l.paintAll();1")
+    Sleep 200
+    RichSay("连着重画两次也不漂（右键菜单的勾选靠这个值）"
+        , JStr(RichEval(w, "__l.lang()")) = "python", JStr(RichEval(w, "__l.lang()")))
+
+    /* ---- 3. 可视化里用右键菜单改语言 → 切回 Markdown 源码 ---------------- */
+    RichEval(w, "__l.setLang('javascript');1")
+    Sleep 200
+    RichSay("菜单设成 JavaScript 后页面读得回来"
+        , JStr(RichEval(w, "__l.lang()")) = "javascript", JStr(RichEval(w, "__l.lang()")))
+    RichEval(w, "__l.mdBtn().click();1")
+    Sleep 300
+    md1 := JStr(RichEval(w, "__l.mdText()"))
+    RichSay("切到源码后围栏上还有 javascript"
+        , InStr(md1, F "javascript") > 0, StrReplace(md1, Chr(10), "|"))
+
+    /* ---- 4. 再往返一趟：源码 → 可视化 → 源码（用户报的第二种） ---------- */
+    RichEval(w, "__l.writeMd(String.fromCharCode(96,96,96) + 'toml\na = 1\n' + String.fromCharCode(96,96,96));1")
+    Sleep 300
+    RichSay("源码写 " F "toml → 可视化后是 toml"
+        , JStr(RichEval(w, "__l.lang()")) = "toml", JStr(RichEval(w, "__l.lang()")))
+    RichEval(w, "__l.mdBtn().click();1")
+    Sleep 300
+    md2 := JStr(RichEval(w, "__l.mdText()"))
+    RichSay("往返一趟 toml 没丢", InStr(md2, F "toml") > 0, StrReplace(md2, Chr(10), "|"))
+
+    /* ---- 5. 「纯文本」也要保住：它不写 language-x，只写 data-lang -------- */
+    RichEval(w, "__l.writeMd(String.fromCharCode(96,96,96) + 'python\nprint(2)\n' + String.fromCharCode(96,96,96));1")
+    Sleep 250
+    RichEval(w, "__l.setLang('text');1")
+    Sleep 200
+    RichSay("选「纯文本」后页面读得到 text"
+        , JStr(RichEval(w, "__l.lang()")) = "text", JStr(RichEval(w, "__l.lang()")))
+    RichEval(w, "__l.mdBtn().click();1")
+    Sleep 300
+    md3 := JStr(RichEval(w, "__l.mdText()"))
+    RichSay("切到源码后围栏是 " F "text（不是空的）"
+        , InStr(md3, F "text") > 0, StrReplace(md3, Chr(10), "|"))
+
+    /* ---- 6. 在"有 <code> 的块"里编辑：另起一行、输入文字都不能走样 -------
+       这条是给保留 <code> 这个改动兜底的：以前重画会把 <code> 冲掉，用户
+       实际上是在裸 <pre> 里打字；现在 code 一直在，浏览器的插入行为可能
+       变成 <div>（那 textOf 就读不出换行了，两行会粘成一行）。 */
+    RichEval(w, "__l.writeMd(String.fromCharCode(96,96,96) + 'python\nprint(3)\n' + String.fromCharCode(96,96,96));1")
+    Sleep 250
+    RichEval(w, "__l.paintAll();1")
+    Sleep 150
+    RichSay("重画后 <code> 还在（这条块接下来要在里面编辑）"
+        , Trim(JStr(RichEval(w, "__l.hasCode()"))) = "1", JStr(RichEval(w, "__l.cls()")))
+    t1 := JStr(RichEval(w, "__l.insertLine()"))
+    RichSay("在 <code> 里另起一行，读回来是两行（不粘行）"
+        , InStr(t1, "\n") > 0, StrReplace(t1, "\n", "|"))
+    t2 := JStr(RichEval(w, "__l.insertLine('insertParagraph')"))
+    RichSay("换一种插入方式（insertParagraph，可能插 div）也不粘行"
+        , InStr(t2, "\n") > 0, StrReplace(t2, "\n", "|"))
+    t3 := JStr(RichEval(w, "__l.typeInto('y = 2')"))
+    RichSay("接着输入的文字也在", InStr(t3, "y = 2") > 0, StrReplace(t3, "\n", "|"))
+
+    /* ---- 7. 落库再读回来：存的是带 data-lang 的 HTML，重开要还认 ------- */
+    w.Cmd("save")
+    Sleep 600
+    row := App.Store.Get(id)
+    RichSay("存进库的 body_html 里有 language-x"
+        , InStr(row.body_html, "language-") > 0 || InStr(row.body_html, "data-lang") > 0
+        , SubStr(row.body_html, 1, 120))
+
+    App.Log("SELFTEST CODELANG 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+
+    App.DeleteNote(id)
 }
 
 /* 自检：导入 TXT / Markdown。

@@ -14,8 +14,11 @@
        照样显示成换行，而 textContent / Markdown 转换都能原样读回来。
        混进来的 <br>（用户按回车时 Chromium 爱插）由 textOf() 统一折算成 \n。
 
-   语言标记：代码块上的 data-lang（取值为 hljs 的语言名）+ <code class="language-x">，
-   两个都写，前者给页面用、后者是 Markdown/HTML 导出的通行写法。
+   语言标记存在两个地方：
+     · <pre data-lang="x">  —— 权威副本。重画只换子节点，属性不动，切视图时
+       MD.toMarkdown() 从这儿读回来（没有它就出现"切一次视图语言就没了"）。
+     · <code class="language-x"> —— 渲染出来的块自带，也是 Markdown/HTML 导出的
+       通行写法；但 highlight.js 的输出里没有 <code>，所以它活不过一次重画。
    ========================================================================== */
 
 (function (root) {
@@ -144,10 +147,27 @@
     }
     if (!html) html = esc(text);
 
-    if (pre.innerHTML === html) return false;
-    pre.innerHTML = html;
+    /* ★ 画进 <code> 而不是 <pre>：highlight.js 的输出里没有 <code>，
+       直接换 pre.innerHTML 会把这个节点连根拔掉，而它正是 language-x 的载体 ——
+       渲染时写进去的语言，上色一次就没了。没有 <code> 的老数据保持原样
+       （不凭空加节点，contenteditable 里节点结构一变，回车和粘贴的行为就跟着变）。 */
+    const code = codeEl(pre);
+    const host = code || pre;
+    const changed = host.innerHTML !== html;
+    if (changed) host.innerHTML = html;
+    /* 内容没变也要把语言补上：data-lang 可能只写在 <code> 上，而 <code>
+       已经被上一版 paint 冲掉过一次 */
+    syncLang(pre, lang);
     pre.setAttribute('data-hl', lang || 'auto');
-    return true;
+    return changed;
+  }
+
+  /* 语言落到 <pre> 的 data-lang 上。这是唯一活得比 DOM 重绘更久的载体：
+     <code class="language-x"> 只在"还没被上色"的块里存在，
+     而 data-lang 在 <pre> 上，换多少遍子节点都不受影响。 */
+  function syncLang(pre, lang) {
+    if (lang) pre.setAttribute('data-lang', lang);
+    else pre.removeAttribute('data-lang');
   }
 
   /* 光标在不在这个块里。在的话绝对不能重画。 */

@@ -255,8 +255,17 @@
            插进来的 <br>。三种都得还原成换行，否则导出的 Markdown 会把整个
            代码块挤成一行（着色功能上线后必须这么读，textContent 会丢 <br>）。 */
         const codeNode = node.querySelector('code');
+        /* 语言有三个可能的位置，按"越靠近当前状态越优先"取：
+             <code class="language-x">  刚渲染出来、还没上色的块
+             <code data-lang="x">       菜单改过语言但还没重画
+             <pre data-lang="x">        上过色的块 —— 着色会换掉 <code> 里的内容，
+                                        没有 <code> 的块更是全靠这个属性，
+                                        漏了它就会出现"切一次视图语言就没了" */
         const m = codeNode ? /(?:^|\s)language-([\w+#-]+)/.exec(codeNode.className || '') : null;
-        const lang = m ? m[1] : '';
+        const lang = (m && m[1])
+          || (codeNode && codeNode.getAttribute('data-lang'))
+          || node.getAttribute('data-lang')
+          || '';
         const code = preText(node).replace(/\n+$/, '');
         return '\n```' + lang + '\n' + code + '\n```\n\n';
       }
