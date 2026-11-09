@@ -41,6 +41,7 @@
   const rmOffWrap = $('rmOffWrap'), rmDayWrap = $('rmDayWrap');
   const rmAnchor = $('rmAnchor'), rmNum = $('rmNum'), rmUnit = $('rmUnit');
   const rmDays = $('rmDays'), rmAt = $('rmAt');
+  const rmMail = $('rmMail'), rmHook = $('rmHook'), rmHookUrl = $('rmHookUrl');
   const lightbox = $('lightbox'), lightboxImg = $('lightboxImg');
   const codeCopy = $('codeCopy'), codeCopyText = $('codeCopyText');
 
@@ -690,19 +691,29 @@
       const days = Math.max(0, Math.min(60, Number(rmDays.value) || 0));
       send({
         type: 'rem-add', id: state.remId, kind: 'daily',
-        days: days, at_time: rmAt.value || '09:00'
+        days: days, at_time: rmAt.value || '09:00',
+        mail: rmMail.checked ? 1 : 0,
+        hook: rmHook.checked ? 1 : 0,
+        hook_url: rmHookUrl.value.trim()
       });
     } else {
       const unit = Number(rmUnit.value) || 1;
       const num = Math.max(0, Number(rmNum.value) || 0);
       send({
         type: 'rem-add', id: state.remId, kind: 'offset',
-        anchor: rmAnchor.value, offset: Math.min(43200, num * unit)
+        anchor: rmAnchor.value, offset: Math.min(43200, num * unit),
+        mail: rmMail.checked ? 1 : 0,
+        hook: rmHook.checked ? 1 : 0,
+        hook_url: rmHookUrl.value.trim()
       });
     }
   }
 
   rmKind.addEventListener('change', remKindChanged);
+  rmHook.addEventListener('change', () => {
+    rmHookUrl.hidden = !rmHook.checked;
+    if (rmHook.checked) rmHookUrl.focus();
+  });
   rmAdd.addEventListener('click', addRule);
   $('rmpClose').addEventListener('click', closeRem);
   rmp.addEventListener('keydown', e => {
@@ -1334,6 +1345,14 @@
       return 1;
     },
     remHint: () => rmpHint.textContent,
+    /* 点第 i 张卡片右上角的 ↗。走真 DOM 点击，和用户按下去是同一条路 */
+    clickLk: i => {
+      const el = listEl.querySelectorAll('.ti')[i];
+      const b = el && el.querySelector('.lk');
+      if (!b) return 0;
+      b.click();
+      return 1;
+    },
     foot: i => (listEl.querySelectorAll('.ti-foot')[i] || {}).textContent || '',
     mdValue: () => mdpText.value,
     setMd: v => { mdpText.value = v; applyMd(); return 1; },

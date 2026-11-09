@@ -255,3 +255,28 @@ input[type="checkbox"] {
 .status.show { opacity: 1; }
 
 .status.err { color: #b3352b; }
+
+/* ---- 提醒邮件 ----------------------------------------------------------- */
+/* 主机 / 账号 / 收件人这类是长文本，要占满右半边而不是固定宽度；
+   等宽字体是因为里面全是 smtp.qq.com 这种域名，等宽更容易核对。 */
+.txt {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--fg);
+  font: 12.5px/1.4 Consolas, "Cascadia Mono", monospace;
+}
+
+.txt:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(184, 134, 11, .16);
+}
+
+.txt::placeholder {
+  color: #b3aca0;
+  font-family: inherit;
+}

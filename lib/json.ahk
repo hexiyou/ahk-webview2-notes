@@ -165,6 +165,57 @@ JsonUnescape(s) {
     return out
 }
 
+/* 取一个嵌套对象的原始文本，如 "webhook":{"on":1,"url":"…"} → '{…}'。
+   用括号配平而不是正则：值里可能出现 } 或者整个 URL 带花括号，
+   正则一贪婪就切错。扫描时跳过字符串内的一切，只数字符串外的括号。
+   取到之后可以继续用 JsonStr / JsonNum / JsonBool 读它的扁平字段。 */
+JsonObj(text, key) {
+    _ndl := '"' key '"'
+    _kl := StrLen(_ndl)
+    _n := StrLen(text)
+    _at := 0
+    while true {
+        _at := InStr(text, _ndl, 1, _at + 1)
+        if !_at
+            break
+        _i := _at + _kl
+        while (_i <= _n && InStr(" `t`r`n", SubStr(text, _i, 1)))
+            _i++
+        if (SubStr(text, _i, 1) != ":")
+            continue
+        _i++
+        while (_i <= _n && InStr(" `t`r`n", SubStr(text, _i, 1)))
+            _i++
+        if (SubStr(text, _i, 1) != "{")
+            continue
+        _depth := 0
+        _q := false
+        _e := _i
+        while (_e <= _n) {
+            _c := SubStr(text, _e, 1)
+            if _q {
+                if (_c = "\") {
+                    _e += 2
+                    continue
+                }
+                if (_c = '"')
+                    _q := false
+            } else if (_c = '"') {
+                _q := true
+            } else if (_c = "{") {
+                _depth++
+            } else if (_c = "}") {
+                _depth--
+                if (_depth = 0)
+                    return SubStr(text, _i, _e - _i + 1)
+            }
+            _e++
+        }
+        return ""
+    }
+    return ""
+}
+
 /* COM 异常的 Message 后面会挂 "Source: ... Description: ..."，只留前半句人话 */
 CleanComError(msg) {
     p := InStr(msg, 'Source:')

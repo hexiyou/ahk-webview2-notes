@@ -25,7 +25,10 @@ class Reminder {
     static S := 0                    ; Store 实例（由 App 注入）
     static Clock := 0                ; 假时钟（测试注入；0 = 用真实时间）
     static Busy := false             ; tick 重入保护
-    static Hook := 0                 ; 投递器：Hook(fire) -> {ok, detail}
+    static Hook := 0                 ; 投递器：Hook(fire) -> {ok, detail}（自检用）
+    /* P3 的派发器：Notifier(fire) -> {ok,pending} / 0。0 表示没接投递通道
+       （探针单独 include 本文件时就是 0），这时一律走托盘提示。 */
+    static Notifier := 0
     static GRACE := 600              ; 错过宽限：10 分钟内补发，更早只记 missed
     static SENDING_TIMEOUT := 300    ; sending 超过 5 分钟没回执 = 子进程崩了
 
@@ -263,12 +266,15 @@ class Reminder {
             daysBefore := 0
         if (daysBefore > 60)
             daysBefore := 60
+        /* notify 是通道配置的 JSON（{"smtp":{"on":1}} 这种）。空串 = 没配通道，
+           投递时退回托盘提示 —— P2 建的老规则就是这样，行为不变。 */
+        ntfy := Reminder._get(opts, "notify", "")
         now := Reminder.Now()
         db := Reminder.db()
         res := db.Run("INSERT INTO todo_reminders(todo_id, kind, anchor, offset_min, at_time,"
             . " days_before, notify, enabled, next_fire_at, last_fired_at,"
-            . " created_at, updated_at) VALUES(?,?,?,?,?,?,'',1,0,0,?,?)"
-            , todoID, kind, anchor, offsetMin, atTime, daysBefore, now, now)
+            . " created_at, updated_at) VALUES(?,?,?,?,?,?,?,1,0,0,?,?)"
+            , todoID, kind, anchor, offsetMin, atTime, daysBefore, ntfy, now, now)
         id := Integer(res.lastId)
         next := Reminder.RefreshRule(id, now)
         rule := Reminder.Get(id)
@@ -279,6 +285,16 @@ class Reminder {
         else if (next = 0)
             warn := Reminder.StopReason(rule, todo)
         return {id: id, next: next, warn: warn}
+    }
+
+    /* 改一条规则的通道配置。传空串 = 退回托盘。 */
+    static SetNotify(id, notifyTxt) {
+        rule := Reminder.Get(id)
+        if !rule
+            return 0
+        Reminder.db().Run("UPDATE todo_reminders SET notify=?, updated_at=? WHERE id=?"
+            , notifyTxt, Reminder.Now(), id)
+        return 1
     }
 
     static Delete(id) {
@@ -371,7 +387,7 @@ class Reminder {
     /* 主循环。返回 {sent, ok, failed, missed}，方便自检直接断言。
        now 可注入 —— 这是整个引擎可测的前提。 */
     static Tick(now := 0) {
-        out := {sent: 0, ok: 0, failed: 0, missed: 0}
+        out := {sent: 0, ok: 0, failed: 0, missed: 0, pending: 0}
         if !now
             now := Reminder.Now()
         if Reminder.Busy
@@ -389,6 +405,8 @@ class Reminder {
                     out.ok += 1
                 else if (res = "missed")
                     out.missed += 1
+                else if (res = "pending")
+                    out.pending += 1          ; 已交给子进程，回执还没回来
                 else
                     out.failed += 1
             }
@@ -436,7 +454,14 @@ class Reminder {
         }
 
         fire := Reminder._FireInfo(todo, r, fireAt, late)
+        fire.fire_id := Reminder.FireID(todo.id, r["id"], fireAt)
         res := Reminder.Deliver(fire)
+        /* 子进程模式：状态停在 sending，等下一次 tick 扫回执再落 ok/failed。
+           这里绝不能先写成 ok —— 邮件还在发，库上已经显示"已提醒"了。 */
+        if Reminder._IsPending(res) {
+            Reminder.Advance(r["id"], fireAt, now)
+            return "pending"
+        }
         ok := (res && res.ok) ? 1 : 0
         detail := Trim((late > 0 ? "late " late "s " : "")
             . Reminder._get(res, "detail", ""))
@@ -480,6 +505,25 @@ class Reminder {
             , "超时未回执", " · 超时未回执", now, now - Reminder.SENDING_TIMEOUT).changes
     }
 
+    /* 唯一索引保证 (todo, 规则, 时刻) 只有一行，所以插完反查是安全的。
+       派发作业要用行 id 命名文件、回收回执也要按 id 回写。 */
+    static FireID(todoID, remID, fireAt) {
+        return Integer(Reminder.db().Scalar(
+            "SELECT id FROM todo_fires WHERE todo_id=? AND reminder_id=? AND fire_at=?"
+            , todoID, remID, fireAt))
+    }
+
+    /* 投递结果是 Object（派发器）或 Map（自检里的 Hook）。
+       Object 用 HasProp，Map 用 Has —— 混着写会在自检里抛
+       'has no property named "pending"'，整轮 tick 直接不跑。 */
+    static _IsPending(res) {
+        if !IsObject(res)
+            return false
+        if res is Map
+            return res.Has("pending") && res["pending"]
+        return res.HasProp("pending") && res.pending
+    }
+
     static _InsertFire(todo, r, fireAt, state, detail, now) {
         return Reminder.db().Run("INSERT OR IGNORE INTO todo_fires"
             . "(todo_id, reminder_id, fire_at, state, detail, started_at)"
@@ -504,7 +548,8 @@ class Reminder {
             status_text: Reminder.StatusText(todo.status),
             start_at: todo.start_at,
             due_at: todo.due_at,
-            rule_text: Reminder.Describe(rule, todo)
+            rule_text: Reminder.Describe(rule, todo),
+            notify: rule.notify
         }
         fire.message := Reminder.Message(fire)
         return fire
@@ -541,6 +586,13 @@ class Reminder {
         try {
             if IsObject(Reminder.Hook)
                 return Reminder.Hook.Call(fire)
+            /* 派发器返回 0 = 这条规则没配任何外部通道，退回托盘提示。
+               所以 P2 建的老规则（notify 是空串）行为一字不变。 */
+            if IsObject(Reminder.Notifier) {
+                res := Reminder.Notifier.Call(fire)
+                if IsObject(res)
+                    return res
+            }
             return Reminder._Tray(fire)
         } catch as e {
             return {ok: 0, detail: "投递异常：" Reminder._scrub(e.Message)}

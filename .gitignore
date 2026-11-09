@@ -3,7 +3,11 @@ data/
 dist/data/
 .webview2/
 
-# ── 测试与调试产物（临时脚本一律 _ 前缀） ──
+# ── 本机测试凭据（SMTP 授权码等）：只在本机存在，绝不入库 ──
+# 这些文件里有明文密码。仓库一旦推出去就等于公开，删 commit 也洗不掉历史。
+tests/*.txt
+tests/*.secret
+tests/*.credential*
 _*.txt
 _*.log
 _*.err

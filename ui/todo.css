@@ -457,3 +457,39 @@
 }
 .rmp-hint { font-size: 11px; color: var(--fg-dim); }
 .rmp-hint.warn { color: #b9770e; }
+
+/* ---- 规则面板底部的通知方式 --------------------------------------------- */
+.rmp-ch {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, .08);
+}
+
+.rmp-chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.rmp-chk input { margin: 0; }
+
+.rmp-url {
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid rgba(0, 0, 0, .16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .8);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.rmp-url[hidden] { display: none; }

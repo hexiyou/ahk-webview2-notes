@@ -131,6 +131,14 @@
       </span>
       <button id="rmAdd" class="primary" type="button">加一条</button>
     </div>
+    <!-- 通知方式。都不勾 = 托盘提示（默认，不打扰）。
+         邮件走设置页里的 SMTP 配置；Webhook 只发 JSON POST。 -->
+    <div class="rmp-ch">
+      <span class="rmp-pre">通知</span>
+      <label class="rmp-chk"><input type="checkbox" id="rmMail"> 邮件</label>
+      <label class="rmp-chk"><input type="checkbox" id="rmHook"> Webhook</label>
+      <input id="rmHookUrl" class="rmp-url" type="url" placeholder="https://example.com/hook" hidden spellcheck="false">
+    </div>
     <div class="rmp-foot">
       <span class="rmp-hint" id="rmpHint"></span>
       <span class="grow"></span>

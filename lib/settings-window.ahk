@@ -167,6 +167,17 @@ class SettingsWindow {
         j .= '"hkNew":' JsonQuote(App.Cfg("hotkey", "new", "^!n")) ','
         j .= '"hkList":' JsonQuote(App.Cfg("hotkey", "list", "^!l")) ','
         j .= '"hkToggle":' JsonQuote(App.Cfg("hotkey", "toggle", "^!h")) ','
+        /* 邮件提醒。pass_enc 的密文不出宿主：页面只需要知道"存过没有"，
+           拿到密文也解不开（DPAPI 绑当前用户），传过去只是徒增泄露面。 */
+        j .= '"smtpOn":' (App.Cfg("smtp", "enabled", 0) ? 1 : 0) ','
+        j .= '"smtpHost":' JsonQuote(App.Cfg("smtp", "host", "")) ','
+        j .= '"smtpPort":' App.Cfg("smtp", "port", 465) ','
+        j .= '"smtpUser":' JsonQuote(App.Cfg("smtp", "user", "")) ','
+        j .= '"smtpFrom":' JsonQuote(App.Cfg("smtp", "from", "")) ','
+        j .= '"smtpTo":' JsonQuote(App.Cfg("smtp", "to", "")) ','
+        j .= '"smtpTimeout":' App.Cfg("smtp", "timeout", 20) ','
+        j .= '"smtpHasPass":' (App.Cfg("smtp", "pass_enc", "") != "" ? 1 : 0) ','
+        j .= '"autostart":' (App.AutostartOn() ? 1 : 0) ','
         j .= '"colors":['
         all := NoteWindow.Colors()
         first := true
@@ -224,6 +235,12 @@ class SettingsWindow {
             case "log":
                 if SettingsWindow.Hooks && SettingsWindow.Hooks.Has("onLog")
                     try SettingsWindow.Hooks["onLog"]()
+
+            /* 测试邮件：把当前表单值一起带过去，先存再发。
+               走 hook 是为了让它退到独立线程（发一次要几秒，不能占 COM 回调）。 */
+            case "smtpTest":
+                if SettingsWindow.Hooks && SettingsWindow.Hooks.Has("onSmtpTest")
+                    try SettingsWindow.Hooks["onSmtpTest"](raw)
         }
     }
 }

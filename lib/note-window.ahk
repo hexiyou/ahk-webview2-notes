@@ -250,7 +250,12 @@ class NoteWindow {
                     this.menuLang := JsonStr(raw, "lang")
                     SetTimer(ObjBindMethod(this, "ShowTodoItemMenu"), -10)
                 case "open-note":
-                    App.OpenNote(JsonNum(raw, "id"))
+                    ; 待办项点 ↗ 跳关联便签。目标便签很可能没开着，OpenNote 会
+                    ; 当场建窗（await WebView2 controller）—— 和 "new" 一样，
+                    ; 在 COM 回调里建窗会永久挂住，整个程序的窗口全冻死。
+                    ; 这个坑 P1 时漏了：关联完点 ↗，程序直接卡住只能杀进程。
+                    nid := JsonNum(raw, "id")
+                    SetTimer(() => App.OpenNote(nid), -10)
                 case "pin":
                     this.DoPin(JsonBool(raw, "on"))
                 case "color":
@@ -517,16 +522,37 @@ class NoteWindow {
             . ',"rules":' NoteWindow.RulesJson(todoID) "}")
     }
 
+    /* 通道：页面给两个开关（mail / hook）+ 一个 URL。
+       都不勾 → notify 是空串 → 投递时走托盘提示，和 P2 的老规则一致。
+       在规则级配而不是全局配，是因为"这条要发邮件、那条只要托盘"
+       才是真实需求。
+       抽成静态函数是为了能单独测：写进库里的这串 JSON 必须能被
+       Notify.Channels() 解析回来，光看代码不算数。 */
+    static BuildNotify(mail, hookOn, hookUrl) {
+        ntf := ""
+        if mail
+            ntf .= '"smtp":{"on":1,"to":""}'
+        url := Trim(hookUrl)
+        /* 勾了 Webhook 却没填 URL 等于没配：静默退回托盘，
+           而不是存一条永远发不出去的规则。 */
+        if (hookOn && url != "")
+            ntf .= (ntf = "" ? "" : ",") '"webhook":{"on":1,"url":' JsonQuote(url) '}'
+        return ntf = "" ? "" : "{" ntf "}"
+    }
+
     DoRemAdd(raw) {
         id := JsonNum(raw, "id")
         if !TodoStore.Get(id)
             return
+        ntf := NoteWindow.BuildNotify(JsonNum(raw, "mail", 0)
+            , JsonNum(raw, "hook", 0), JsonStr(raw, "hook_url", ""))
         res := Reminder.Add(id, Map(
             "kind", JsonStr(raw, "kind", "offset"),
             "anchor", JsonStr(raw, "anchor", "start"),
             "offset_min", JsonNum(raw, "offset"),
             "at_time", JsonStr(raw, "at_time", "09:00"),
-            "days_before", JsonNum(raw, "days")))
+            "days_before", JsonNum(raw, "days"),
+            "notify", ntf))
         /* 排不上或时间已经过去：当场说清楚，而不是等 10 分钟后悄悄记一条 missed */
         warn := IsObject(res) ? res.warn : "没能加进去"
         this.Send('{"type":"rem-warn","text":' JsonQuote(warn) '}')

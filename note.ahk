@@ -39,6 +39,7 @@
 #Include lib\ipc.ahk
 #Include lib\pdf.ahk
 #Include lib\word.ahk
+#Include lib\notify.ahk
 
 class App {
     static Name := "QuickNote"
@@ -75,6 +76,17 @@ class App {
         if App.HasArg("--word-export")
             ExitApp Word.ExportManifest(App.ArgAfter("--word-export")
                 , App.ArgAfter("--result"))
+
+        /* 提醒投递子进程：同样必须在单实例锁**之前**判。放后面的话会被正在
+           跑的那个实例当成"重复启动"，转发一下就退出，父进程永远等不到回执，
+           5 分钟后 todo_fires 上就是一条"超时未回执"。
+           这条路只读作业文件、发请求、写结果文件，不建窗口、不开数据库。 */
+        if App.HasArg("--notify") {
+            if (dir := App.ArgAfter("--data-dir"))
+                App.DataDir := dir
+            ok := Notify.RunJob(App.ArgAfter("--notify"), App.ArgAfter("--result"))
+            ExitApp ok ? 0 : 1
+        }
 
         ; 1) 单实例：抢到锁的继续，抢不到的唤出已有实例后退出
         App.InstanceLock := DllCall("CreateMutexW", "ptr", 0, "int", 0, "wstr", "Local\QuickNote.SingleInstance", "ptr")
@@ -128,6 +140,9 @@ class App {
         /* 提醒引擎也复用同一条连接。Attach 顺手把"事项时间变了→重算规则"
            的钩子挂到 TodoStore 上。 */
         Reminder.Attach(App.Store)
+        /* 投递派发器：规则配了 run/webhook/smtp 就走子进程，没配就退回托盘。
+           Notifier 返回 0 表示"这条规则没有外部通道"，Deliver 据此走托盘。 */
+        Reminder.Notifier := (fire) => Notify.Dispatch(fire, fire.fire_id)
         ; PDF 导出要自己建一个隐藏的 WebView2，路径跟便签窗口共用一套
         Pdf.Ctx := App.Ctx
 
@@ -223,6 +238,8 @@ class App {
             SetTimer(SelfTestTodo, -2500)
         if App.HasArg("--selftest-remind")
             SetTimer(SelfTestRemind, -2500)
+        if App.HasArg("--selftest-notify")
+            SetTimer(SelfTestNotify, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -270,11 +287,13 @@ class App {
            断言就变成了"看谁先跑"。 */
         if !App.TickOn
             return 0
-        try {
-            Reminder.Tick()
-        } catch as e {
+        /* 两件事各自 try：回执回收出问题不该让调度整轮不跑，反过来也一样。 */
+        try Notify.Collect()
+        catch as e
+            App.Log("回执回收出错：" CleanComError(e.Message))
+        try Reminder.Tick()
+        catch as e
             App.Log("提醒调度出错：" CleanComError(e.Message))
-        }
         return 1
     }
 
@@ -874,7 +893,8 @@ class App {
         SettingsWindow.Hooks := Map(
             "onSave", NoteApplySettings,
             "onDataDir", NoteDataDir,
-            "onLog", NoteOpenLog)
+            "onLog", NoteOpenLog,
+            "onSmtpTest", NoteSmtpTest)
         SettingsWindow.Open()
     }
 
@@ -935,9 +955,88 @@ class App {
             ; 重建所有窗口是重活，别在消息线程里做
             SetTimer(NoteReloadTick, -10)
         }
+        App.ApplySmtp(raw)
+        autoErr := App.ApplyAutostart(raw)
         App.Log("设置已保存：字号 " fs "，透明 " tr
-            "，默认颜色 " dc "，启动显示全部 " showAll "，启动开列表 " openList)
-        return ""
+            "，默认颜色 " dc "，启动显示全部 " showAll "，启动开列表 " openList
+            "，邮件提醒 " (JsonNum(raw, "smtpOn", 0) ? 1 : 0))
+        return autoErr
+    }
+
+    /* ---- 提醒邮件设置 -------------------------------------------------------
+       单独抽出来，是因为「发一封测试邮件」也要用它：点测试只该存邮件相关的
+       几项再发信，不该顺手把热键、字号、透明度一起改掉（热键冲突还会报错，
+       用户点个"测试"突然看到红字会更困惑）。 */
+    static ApplySmtp(raw) {
+        App.SetCfg("smtp", "enabled", JsonNum(raw, "smtpOn", 0) ? 1 : 0)
+        App.SetCfg("smtp", "host", Trim(JsonStr(raw, "smtpHost", "")))
+        port := JsonNum(raw, "smtpPort", 465)
+        App.SetCfg("smtp", "port", (port < 1 || port > 65535) ? 465 : port)
+        App.SetCfg("smtp", "user", Trim(JsonStr(raw, "smtpUser", "")))
+        App.SetCfg("smtp", "from", Trim(JsonStr(raw, "smtpFrom", "")))
+        App.SetCfg("smtp", "to", Trim(JsonStr(raw, "smtpTo", "")))
+        to := JsonNum(raw, "smtpTimeout", 20)
+        App.SetCfg("smtp", "timeout", (to < 5 || to > 60) ? 20 : to)
+        /* 密码框留空 = 不改。没有这个判断，每次保存都会把已存的授权码抹掉，
+           然后提醒静默失败 —— 用户根本不会想到是"保存设置"干的。 */
+        p := JsonStr(raw, "smtpPass", "")
+        if (p != "")
+            App.SetCfg("smtp", "pass_enc", Dpapi.Protect(p))
+    }
+
+    static ApplyAutostart(raw) {
+        auto := JsonNum(raw, "autostart", 0) ? 1 : 0
+        App.SetCfg("app", "autostart", auto)
+        return App.SetAutostart(auto) ? "" : "开机自启没写成功（可能被安全软件拦了）"
+    }
+
+    /* 开机自启：只写 HKCU，不碰 HKLM —— 不需要管理员权限，卸载机器上
+       其它用户也不受影响。值名固定为 QuickNote，取消时按这个名字删。 */
+    static SetAutostart(on, valueName := "") {
+        key := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+        /* 值名可注入：自检要写一个自己的名字，不能去动用户真正在用的
+           QuickNote 那一项 —— 自检失败时把用户的开机自启关掉是很讨厌的事。 */
+        if (valueName = "")
+            valueName := App.Name
+        try {
+            if on {
+                cmd := A_IsCompiled
+                    ? '"' A_ScriptFullPath '"'
+                    : '"' A_AhkPath '" "' A_ScriptFullPath '"'
+                RegWrite cmd, "REG_SZ", key, valueName
+            } else {
+                try RegDelete key, valueName
+            }
+            return 1
+        } catch as e {
+            App.Log("开机自启设置失败：" CleanComError(e.Message))
+            return 0
+        }
+    }
+
+    static AutostartOn() {
+        try
+            return RegRead("HKCU\Software\Microsoft\Windows\CurrentVersion\Run", App.Name) != ""
+        catch
+            return 0
+    }
+
+    /* 设置页的「发一封测试邮件」。走 SetTimer 是为了不占着 COM 回调：
+       发一次要 2～20 秒，卡在回调里整个设置窗口就白了。 */
+    static SmtpTest(raw) {
+        App.ApplySmtp(raw)
+        fire := {
+            todo_id: 0, note_id: 0, fire_at: Store.Now(),
+            title: "QuickNote 测试提醒", note_title: "", status: "todo",
+            status_text: "未开始", start_at: 0, due_at: 0,
+            rule_text: "设置页的测试按钮",
+            message: "这是一封测试邮件。`n`n能收到就说明 SMTP 配置可用，"
+                . "接下来在待办项的「提醒设置」里勾上邮件通道即可。"
+        }
+        r := Notify._DoSmtp(Map("to", ""), fire)
+        if SettingsWindow.Win
+            SettingsWindow.Send('{"type":"smtpTest","ok":' (r.ok ? 1 : 0)
+                . ',"msg":' JsonQuote(r.detail) '}')
     }
 
     /* ---- 字号 ---------------------------------------------------------------
@@ -1362,13 +1461,22 @@ class App {
     }
 
     static Quit() {
+        /* 先关窗口：WebView2 controller 必须先 Close，否则渲染进程一直占着。 */
         for id, w in NoteWindow.All.Clone()
             w.Destroy()
         if ListWindow.IsOpen()
             ListWindow.Close()
         if App.Store
             App.Store.Close()
-        ExitApp()
+
+        /* 该做的收尾到这里都做完了（窗口关了、库关了、WAL 已归档）。
+           最后一步**不用 ExitApp**：它会逐个释放脚本对象，而 WebView2 的
+           COM 事件处理器是异步收尾的，两边撞上就是"关掉程序之后弹一个
+           AutoHotkey 已停止工作"（事件日志 0xC0000005 + 0xC000041D，
+           偏移固定），日志里还看不出任何异常 —— 因为它发生在 OnExit 之后。
+           直接终止进程，跳过那层不可控的拆除。 */
+        App.Log("退出：清理完成，直接终止进程")
+        DllCall("kernel32\ExitProcess", "uint", 0)
     }
 
     ; ========================================================================
@@ -1917,12 +2025,17 @@ SelfTestHotkey() {
    验四件事：能放大、下限 10、上限 32、宿主把最终值写进了 config.ini。 */
 SelfTestFont() {
     w := 0
+    /* 只挑普通便签：待办页面（ui\todo.js）没有 Ctrl+滚轮缩放处理器，
+       拿它来测字号必然"15 → 15 → 15"。而 NoteWindow.All 是 Map，
+       遍历顺序不是插入顺序 —— 共享数据目录里只要有一张待办，就可能挑到它。 */
     for id, x in NoteWindow.All {
+        if (x.kind = "todo")
+            continue
         w := x
         break
     }
     if !w {
-        App.Log("SELFTEST 字号：没有便签窗口，跳过")
+        App.Log("SELFTEST 字号：没有普通便签窗口，跳过")
         SelfTestDone()
         return
     }
@@ -2343,6 +2456,28 @@ SelfTestSettingsRun() {
     hkInPage := JStr(RichEval(w, "document.getElementById('hkNew').value"))
     RichSay("页面读到了字号", fsInPage = String(oldFs), fsInPage " vs " oldFs)
     RichSay("页面读到了热键", hkInPage = oldHk, hkInPage " vs " oldHk)
+
+    /* 提醒邮件（P3）。三条都不能少：
+       ① 字段要真的被 init 推过去，否则用户看到的是一张空表单；
+       ② 密码框必须是空的 —— 密文只存 config.ini，绝不回传给页面；
+       ③ 提示文案要跟着"有没有存过密码"变。 */
+    RichSay("页面读到了 SMTP 服务器"
+        , (sh := JStr(RichEval(w, "document.getElementById('smtpHost').value"))) = App.Cfg("smtp", "host", "")
+        , "[" sh "]")
+    RichSay("页面读到了 SMTP 端口"
+        , (sp := JStr(RichEval(w, "String(document.getElementById('smtpPort').value)"))) = String(App.Cfg("smtp", "port", 465))
+        , "[" sp "]")
+    RichSay("密码框是空的（密文不回传页面）"
+        , JStr(RichEval(w, "document.getElementById('smtpPass').value")) = "")
+    hasPass := App.Cfg("smtp", "pass_enc", "") != ""
+    RichSay("密码提示文案跟着有没有存过密码变"
+        , (hint := JStr(RichEval(w, "document.getElementById('smtpPassHint').textContent")))
+            = (hasPass ? "已保存（加密存储）；留空表示不改"
+                       : "还没填。QQ / 163 要在邮箱设置里生成授权码，不是登录密码")
+        , hint)
+    RichSay("开机自启勾选状态和注册表一致"
+        , JStr(RichEval(w, "String(document.getElementById('autostart').checked)"))
+            = (App.AutostartOn() ? "true" : "false"))
 
     ; 默认颜色色块：个数跟 NoteWindow.Colors() 对上，当前值被点亮
     chips := JStr(RichEval(w, "document.querySelectorAll('#swatches .chip').length"))
@@ -4479,6 +4614,16 @@ RichStyle(w, cmd, tag, wantMd, label) {
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
 NoteNewTodo() => App.NewTodoNote()
+
+/* 测试邮件要 2～20 秒，必须在独立线程里跑（SetTimer 起的伪线程），
+   不能直接占着 WebView2 的 COM 回调。 */
+NoteSmtpTest(raw) {
+    SetTimer(NoteSmtpTick(raw), -10)
+}
+
+NoteSmtpTick(raw) {
+    return () => App.SmtpTest(raw)
+}
 ; 便签快捷键：热键回调只转一手，真正的"开窗/提到最前"在独立线程里做
 NoteSummonTick(id) => App.SummonNoteNow(id)
 NoteSummonBound(id) => () => App.SummonNote(id)
@@ -4912,6 +5057,21 @@ SelfTestTodoRun() {
     ix := JStr(RichEval(w, "__todo.idx(" it1.id ")"))
     RichSay("↗ 按钮点亮", JStr(RichEval(w, "__todo.hasClass(" ix ",'.lk','link-ok')")) = "1"
         , "idx=" ix)
+
+    /* 点 ↗ 打开关联便签。目标便签当时**没开着**，OpenNote 会当场建窗 ——
+       这动作原本直接在 COM 回调里跑，结果整个程序冻死（用户报的 bug）。
+       注意这条断言的失败形态是"自检整轮挂住"而不是"某条红"，所以加了
+       超时：真挂住也能在 4 秒后判红并继续往下跑。 */
+    RichEval(w, "__todo.clickLk(" ix ")")
+    t0 := A_TickCount
+    while (A_TickCount - t0 < 4000 && !NoteWindow.All.Has(nid))
+        Sleep 60
+    RichSay("点 ↗ 能打开关联便签（不再卡死）", NoteWindow.All.Has(nid)
+        , "等了 " (A_TickCount - t0) "ms，当前窗口 " NoteWindow.All.Count " 个")
+    if NoteWindow.All.Has(nid)
+        NoteWindow.All[nid].Destroy()
+    Sleep 100
+
     App.Store.Delete(nid)
     w.PushItems()
     Sleep 250
@@ -5011,6 +5171,15 @@ IsAscTodo(items) {
 
 NoteOnExit(reason, code) {
     App.Log("退出：reason=" reason " code=" code)
+    /* 兜底：不管谁、从哪儿调 ExitApp，先把还活着的便签窗口关掉。
+       带着活着的 WebView2 controller 退出，进程会在收尾阶段访问违例 ——
+       Windows 事件日志里是 0xC0000005 + 0xC000041D、偏移固定，用户看到的
+       就是关掉程序后弹一个"AutoHotkey 已停止工作"。
+       正常退出走 App.Quit()，那里已经关过一遍，这里就是空循环。 */
+    try {
+        for id, w in NoteWindow.All.Clone()
+            try w.Destroy()
+    }
 }
 
 /* 编译版没有控制台，也没有 AHK 的语法错误框，出问题必须自己留痕。
@@ -5039,4 +5208,197 @@ catch as e {
         tip := "`n`n编译版看不到详细报错，可以改用项目根目录的 run.bat 跑脚本版定位。"
     MsgBox(msg tip "`n`n崩溃日志：" A_ScriptDir "\crash.log", "QuickNote 启动失败", "Icon!")
     ExitApp 1
+}
+
+/* ============================================================================
+   自检：提醒投递（P3）
+
+   验的是整条链路，不是某个函数：
+     规则（带 notify）→ Tick 派发 → 子进程真跑 → 写回执 → Collect → 库里 ok
+   子进程是真的（note.ahk --notify），所以这个自检也在验"单实例锁之前那条
+   分支没被吞掉"—— 那正是 P3 最容易出错的地方。
+   ============================================================================ */
+
+NT_PASS := 0
+NT_FAIL := 0
+
+NT_Say(name, ok, detail := "") {
+    global NT_PASS, NT_FAIL
+    if ok
+        NT_PASS += 1
+    else
+        NT_FAIL += 1
+    App.Log((ok ? "PASS " : "FAIL ") name (detail != "" ? "  [" detail "]" : ""))
+}
+
+SelfTestNotify() {
+    SetTimer(SelfTestNotifyRun, -50)
+}
+
+SelfTestNotifyRun() {
+    global NT_PASS, NT_FAIL
+    App.TickOn := 0                       ; 关掉常驻 tick，避免和手动 tick 抢时序
+    cfg := App.DataDir "\config.ini"
+    try IniDelete(cfg, "smtp")
+
+    try {
+        /* ---- 1. 配置与加密 ------------------------------------------------- */
+        IniWrite "smtp.example.com", cfg, "smtp", "host"
+        IniWrite "465", cfg, "smtp", "port"
+        IniWrite "me@example.com", cfg, "smtp", "user"
+        IniWrite "me@example.com", cfg, "smtp", "to"
+        IniWrite "20", cfg, "smtp", "timeout"
+        NT_Say("SMTP 配置解析正确"
+            , (sc := Notify.SmtpCfg()) && sc.host = "smtp.example.com" && sc.port = 465
+            , sc ? sc.host ":" sc.port : "读不到")
+
+        App.ApplySmtp('{"smtpOn":1,"smtpHost":"smtp.example.com","smtpPort":465,'
+            . '"smtpUser":"me@example.com","smtpTo":"me@example.com",'
+            . '"smtpTimeout":20,"smtpPass":"qn-secret-pass"}')
+        enc := IniRead(cfg, "smtp", "pass_enc", "")
+        NT_Say("授权码存的是密文", enc != "" && enc != "qn-secret-pass", "len=" StrLen(enc))
+        NT_Say("config.ini 里找不到明文密码"
+            , !InStr(FileRead(cfg, "UTF-8"), "qn-secret-pass"))
+        NT_Say("密文能解回原文", Dpapi.Unprotect(enc) = "qn-secret-pass")
+
+        /* 密码框留空 = 不改。这条最重要：每次保存都把密码抹掉的话，
+           用户点十次保存就会得到十次"提醒静默失败"。 */
+        App.ApplySmtp('{"smtpOn":1,"smtpHost":"smtp.example.com","smtpPort":465,'
+            . '"smtpUser":"me@example.com","smtpTo":"me@example.com",'
+            . '"smtpTimeout":20,"smtpPass":""}')
+        NT_Say("留空保存不会抹掉已存密码"
+            , IniRead(cfg, "smtp", "pass_enc", "") = enc)
+
+        /* ---- 2. 开机自启（用独立值名，绝不动用户真在用的那项） ------------ */
+        tn := "QuickNoteSelfTestAutostart"
+        runKey := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+        NT_Say("开机自启：能写进去", App.SetAutostart(1, tn))
+        v := ""
+        try v := RegRead(runKey, tn)
+        NT_Say("开机自启：注册表里有这一项", v != "", v)
+        NT_Say("开机自启：命令行指向本程序", InStr(v, "note.ahk") > 0 || A_IsCompiled)
+        App.SetAutostart(0, tn)
+        v2 := ""
+        try v2 := RegRead(runKey, tn)
+        catch
+            v2 := ""
+        NT_Say("开机自启：关掉后注册表项没了", v2 = "")
+
+        /* ---- 3. 端到端：规则 → 派发 → 子进程 → 回执 ------------------------ */
+        outFile := App.DataDir "\notify-test.txt"
+        if FileExist(outFile)
+            FileDelete outFile
+        if DirExist(Notify.Dir())
+            loop files, Notify.Dir() "\*.*", "F"
+                try FileDelete A_LoopFilePath
+        Notify.EnsureDir()
+
+        nid := App.Store.Create(Map("title", "投递自检", "kind", "todo"
+            , "body_text", "", "body_md", "", "body_html", ""))
+        startAt := Store.Now() + 3600
+        tid := TodoStore.Add(nid, Map("title", "端到端提醒", "status", "todo"
+            , "start_at", startAt))
+        args := '/c echo qn-notify-ok>"' outFile '"'
+        ntf := '{"run":{"on":1,"exe":"cmd.exe","args":' JsonQuote(args) ',"wait":1}}'
+        addRes := Reminder.Add(tid, Map("kind", "offset", "anchor", "start"
+            , "offset_min", 30, "notify", ntf))
+        rid := addRes.id
+        NT_Say("规则建好了且排上了", rid > 0 && addRes.next > 0
+            , "next=" Reminder.Text(addRes.next))
+        NT_Say("规则上存了通道配置"
+            , InStr(Reminder.Get(rid).notify, "`"run`"") > 0)
+
+        /* 拨假时钟到触发点，手动 tick 一次 —— 派发应该立刻发生 */
+        fireAt := addRes.next
+        Reminder.Clock := fireAt
+        r := Reminder.Tick()
+        NT_Say("到点后派发了一次（pending）", r.pending = 1
+            , "sent=" r.sent " pending=" r.pending " ok=" r.ok " failed=" r.failed)
+        fid := Reminder.FireID(tid, rid, fireAt)
+        NT_Say("todo_fires 里是 sending", fid > 0, "fire id=" fid)
+        NT_Say("作业文件写好了", FileExist(Notify.Dir() "\" fid ".job.json"))
+        NT_Say("作业里带上了通道", FileExist(Notify.Dir() "\" fid ".job.json")
+            && InStr(FileRead(Notify.Dir() "\" fid ".job.json", "UTF-8"), "ch_run") > 0)
+
+        /* 等子进程写回执。真起一个 note.ahk --notify，启动要一两秒。 */
+        t0 := A_TickCount
+        while (A_TickCount - t0 < 25000 && !FileExist(Notify.Dir() "\" fid ".res.json"))
+            Sleep 150
+        NT_Say("子进程写回了回执（没有被单实例锁吞掉）"
+            , FileExist(Notify.Dir() "\" fid ".res.json")
+            , "等了 " (A_TickCount - t0) "ms")
+        if !FileExist(Notify.Dir() "\" fid ".res.json") {
+            App.Log("SELFTEST NOTIFY 结论：未通过（子进程没回执）")
+            App.TickOn := 1
+            Reminder.Clock := 0
+            SelfTestDone()
+            return
+        }
+
+        Notify.Collect()
+        row := Reminder.db().Query("SELECT state, detail FROM todo_fires WHERE id=?", fid)
+        NT_Say("回执回写：sending → ok", row.Length && row[1]["state"] = "ok"
+            , row.Length ? row[1]["state"] : "查不到")
+        NT_Say("回执里记了通道结果", row.Length && InStr(row[1]["detail"], "run:ok") > 0
+            , row.Length ? row[1]["detail"] : "")
+        NT_Say("run 通道真的执行了外部程序", FileExist(outFile))
+        NT_Say("外部程序写的文件内容对得上"
+            , FileExist(outFile) && InStr(FileRead(outFile, "UTF-8"), "qn-notify-ok") > 0
+            , FileExist(outFile) ? Trim(FileRead(outFile, "UTF-8")) : "文件不存在")
+        NT_Say("回执文件用完就删", !FileExist(Notify.Dir() "\" fid ".res.json"))
+
+        /* ---- 4. 没配通道的规则仍然走托盘 ----------------------------------- */
+        tid2 := TodoStore.Add(nid, Map("title", "只要托盘的", "status", "todo"
+            , "start_at", startAt))
+        a2 := Reminder.Add(tid2, Map("kind", "offset", "anchor", "start", "offset_min", 30))
+        Reminder.Clock := a2.next
+        r2 := Reminder.Tick()
+        NT_Say("没配通道 → 不走子进程（pending=0）", r2.pending = 0
+            , "sent=" r2.sent " ok=" r2.ok " pending=" r2.pending)
+        row2 := Reminder.db().Query("SELECT state, detail FROM todo_fires"
+            . " WHERE todo_id=? AND reminder_id=?", tid2, a2.id)
+        NT_Say("托盘通道当场就落了 ok", row2.Length && row2[1]["state"] = "ok"
+            , row2.Length ? row2[1]["detail"] : "查不到")
+
+        /* ---- 5. 页面开关 → BuildNotify → Channels 的闭环 ------------------- */
+        one := NoteWindow.BuildNotify(1, 0, "")
+        NT_Say("只勾邮件 → 1 个 smtp 通道"
+            , (ch1 := Notify.Channels(one)).Length = 1 && ch1[1].kind = "smtp", one)
+
+        two := NoteWindow.BuildNotify(1, 1, "http://x/y")
+        ch2 := Notify.Channels(two)
+        NT_Say("邮件 + Webhook 两个通道都解析出来", ch2.Length = 2
+            , ch2.Length ? ch2[1].kind "/" ch2[2].kind : "解析失败：" two)
+        NT_Say("Webhook 的 URL 原样带过去", ch2.Length = 2 && InStr(two, "http://x/y") > 0, two)
+
+        /* 勾了开关却没填 URL 是最容易犯的错：存下去就是一条永远发不出去的
+           规则，用户只会看到"到点了但什么都没发生"。 */
+        blank := NoteWindow.BuildNotify(0, 1, "   ")
+        NT_Say("勾了 Webhook 但 URL 是空白 → 不存通道（退回托盘）"
+            , blank = "" && Notify.Channels(blank).Length = 0, "[" blank "]")
+
+        NT_Say("两个开关都不勾 → 空串（退回托盘）"
+            , NoteWindow.BuildNotify(0, 0, "http://x/y") = "")
+        NT_Say("空 notify 解析成 0 个通道", Notify.Channels("").Length = 0)
+    } catch as e {
+        NT_Say("自检自身没抛异常", 0, CleanComError(e.Message) " @" e.Line)
+    }
+
+    /* 收尾：假时钟、定时器、临时文件、自检便签都还回去。
+       共享数据目录（tools\_run-st.sh 用的 data\_st）里要是留下便签，
+       下一轮自检启动就会多开一个窗口，还会把别的用例带偏 —— font
+       自检挑到待办便签就是这么来的。 */
+    Reminder.Clock := 0
+    App.TickOn := 1
+    try IniDelete(cfg, "smtp")
+    try FileDelete(App.DataDir "\notify-test.txt")
+    try if IsSet(nid) && nid
+        App.DeleteNote(nid)
+
+    App.Log("SELFTEST NOTIFY 结论：" (NT_FAIL = 0 ? "通过" : "未通过")
+        "（PASS " NT_PASS " / FAIL " NT_FAIL "）")
+    /* 收尾一律走 SelfTestDone() → App.Quit()。裸 ExitApp 会跳过 WebView2
+       controller 的关闭，进程带着活着的 controller 退出，Windows 会补一个
+       "已停止工作"框（0xC000041D）。 */
+    SetTimer(SelfTestDone, -300)
 }

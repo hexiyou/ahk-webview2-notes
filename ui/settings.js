@@ -37,6 +37,9 @@
       const msg = ev.data;
       if (!msg || !msg.type) return;
       if (msg.type === 'init') fill(msg.cfg || {}, msg.info || {});
+      else if (msg.type === 'smtpTest') {
+        status(msg.ok ? '测试邮件已发出，去收件箱看看' : ('发送失败：' + (msg.msg || '未知错误')), !msg.ok);
+      }
       else if (msg.type === 'saved') {
         if (msg.ok) status('已保存');
         else status(msg.msg || '保存失败', true);
@@ -54,6 +57,20 @@
     $('hkNew').value = cfg.hkNew || '';
     $('hkList').value = cfg.hkList || '';
     $('hkToggle').value = cfg.hkToggle || '';
+    /* SMTP：密码框永远是空的 —— 宿主只告诉我们"有没有存过"，
+       不回传密文，也不回传明文。留空 = 不改。 */
+    $('smtpOn').checked = !!cfg.smtpOn;
+    $('smtpHost').value = cfg.smtpHost || '';
+    $('smtpPort').value = cfg.smtpPort || 465;
+    $('smtpUser').value = cfg.smtpUser || '';
+    $('smtpFrom').value = cfg.smtpFrom || '';
+    $('smtpTo').value = cfg.smtpTo || '';
+    $('smtpTimeout').value = cfg.smtpTimeout || 20;
+    $('smtpPass').value = '';
+    $('smtpPassHint').textContent = cfg.smtpHasPass
+      ? '已保存（加密存储）；留空表示不改'
+      : '还没填。QQ / 163 要在邮箱设置里生成授权码，不是登录密码';
+    $('autostart').checked = !!cfg.autostart;
     if (info.dataDir) $('dataDir').textContent = info.dataDir;
     if (info.about) $('about').textContent = info.about;
 
@@ -95,6 +112,12 @@
     });
   }
 
+  function clampNum(v, lo, hi, def) {
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n)) return def;
+    return Math.max(lo, Math.min(hi, n));
+  }
+
   function collect() {
     let fs = parseInt($('fontSize').value, 10);
     if (!Number.isFinite(fs)) fs = 15;
@@ -108,7 +131,17 @@
       defColor: defColor,
       hkNew: $('hkNew').value.trim(),
       hkList: $('hkList').value.trim(),
-      hkToggle: $('hkToggle').value.trim()
+      hkToggle: $('hkToggle').value.trim(),
+      smtpOn: $('smtpOn').checked ? 1 : 0,
+      smtpHost: $('smtpHost').value.trim(),
+      smtpPort: clampNum($('smtpPort').value, 1, 65535, 465),
+      smtpUser: $('smtpUser').value.trim(),
+      /* 空串 = 不改（后端据此跳过写入，免得每次保存都把密码抹掉） */
+      smtpPass: $('smtpPass').value,
+      smtpFrom: $('smtpFrom').value.trim(),
+      smtpTo: $('smtpTo').value.trim(),
+      smtpTimeout: clampNum($('smtpTimeout').value, 5, 60, 20),
+      autostart: $('autostart').checked ? 1 : 0
     };
   }
 
@@ -200,7 +233,23 @@
     $('hkNew').value = '^!n';
     $('hkList').value = '^!l';
     $('hkToggle').value = '^!h';
-    status('已填入默认值，点保存生效');
+    $('smtpOn').checked = false;
+    $('smtpHost').value = '';
+    $('smtpPort').value = 465;
+    $('smtpUser').value = '';
+    $('smtpPass').value = '';
+    $('smtpFrom').value = '';
+    $('smtpTo').value = '';
+    $('smtpTimeout').value = 20;
+    $('autostart').checked = false;
+    status('已填入默认值，点保存生效（授权码不会被清掉）');
+  });
+
+  /* 测试邮件：把当前表单值一起发过去（先存再发）。
+     不先保存的话，用户改了主机/账号点测试，测的还是旧配置。 */
+  $('btnSmtpTest').addEventListener('click', () => {
+    status('正在发送，最多等 20 秒…');
+    send(Object.assign({ type: 'smtpTest' }, collect()));
   });
 
   $('btnDataDir').addEventListener('click', () => send({ type: 'dataDir' }));

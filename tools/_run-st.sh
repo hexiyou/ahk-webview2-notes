@@ -13,6 +13,9 @@ run_one() {
   : > "$LOG"
   # shellcheck disable=SC2086
   "$AHK" note.ahk --data-dir "$DATA" $args >/dev/null 2>&1
+  # 退出码要单独看：进程在收尾阶段崩（0xC0000005 / 0xC000041D）时，
+  # 自检结论行照样是"通过"，只有退出码会露出来。
+  local rc=$?
   local fails passes concl
   fails=$(grep -c '^.*  FAIL ' "$LOG" 2>/dev/null || true)
   passes=$(grep -c '^.*  PASS ' "$LOG" 2>/dev/null || true)
@@ -20,7 +23,13 @@ run_one() {
   if [ -z "$concl" ]; then
     concl=$(grep -o 'SELFTEST.*结论.*' "$LOG" 2>/dev/null | tail -1)
   fi
-  printf '%-22s PASS=%-4s FAIL=%-3s %s\n' "$tag" "${passes:-0}" "${fails:-0}" "${concl:-(无结论行)}"
+  local rctxt="rc=$rc"
+  case "$rc" in
+    0)              rctxt="rc=0" ;;
+    3221225477)     rctxt="rc=0xC0000005 访问违例" ;;
+    3221225597)     rctxt="rc=0xC000041D 用户回调致命异常" ;;
+  esac
+  printf '%-22s PASS=%-4s FAIL=%-3s %-28s %s\n' "$tag" "${passes:-0}" "${fails:-0}" "$rctxt" "${concl:-(无结论行)}"
   if [ "${fails:-0}" != "0" ]; then
     grep 'FAIL ' "$LOG" | sed 's/^/    /'
   fi
@@ -48,6 +57,7 @@ for t in "$@"; do
     docx)      run_one docx      docx      "--selftest-docx" ;;
     todo)      run_one todo      todo      "--selftest-todo" ;;
     remind)    run_one remind    remind    "--selftest-remind" ;;
+    notify)    run_one notify    notify    "--selftest-notify" ;;
     *) echo "未知标签：$t" ;;
   esac
 done

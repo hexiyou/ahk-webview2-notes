@@ -36,6 +36,13 @@
           <em>开机自启时不想弹窗就关掉</em>
         </span>
       </label>
+      <label class="row">
+        <input type="checkbox" id="autostart">
+        <span class="line">
+          <b>开机自启</b>
+          <em>登录 Windows 后自动打开。提醒要程序在跑才会响</em>
+        </span>
+      </label>
     </section>
 
     <section>
@@ -82,6 +89,57 @@
         <span class="grow"><b>显示 / 收起全部</b></span>
         <input type="text" id="hkToggle" class="hk" placeholder="未设置" readonly>
         <button class="clear" data-for="hkToggle" title="清空">×</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>提醒邮件</h2>
+      <p class="note">规则里勾了「邮件」才会发。授权码不是登录密码 —— 去邮箱设置里生成一个。</p>
+      <label class="row">
+        <input type="checkbox" id="smtpOn">
+        <span class="line">
+          <b>启用邮件提醒</b>
+          <em>关掉后规则里的邮件通道一律跳过</em>
+        </span>
+      </label>
+      <div class="row">
+        <span class="grow line"><b>SMTP 服务器</b></span>
+        <input type="text" id="smtpHost" class="txt" placeholder="smtp.qq.com" spellcheck="false">
+      </div>
+      <div class="row">
+        <span class="grow line">
+          <b>端口</b>
+          <em>465 = 隐式 SSL；587 = STARTTLS</em>
+        </span>
+        <input type="number" id="smtpPort" min="1" max="65535" class="num">
+      </div>
+      <div class="row">
+        <span class="grow line"><b>账号</b></span>
+        <input type="text" id="smtpUser" class="txt" placeholder="me@qq.com" spellcheck="false">
+      </div>
+      <div class="row">
+        <span class="grow line">
+          <b>授权码</b>
+          <em id="smtpPassHint">已保存；留空表示不改</em>
+        </span>
+        <input type="password" id="smtpPass" class="txt" placeholder="留空则不改" spellcheck="false" autocomplete="new-password">
+      </div>
+      <div class="row">
+        <span class="grow line"><b>发件人</b><em>留空就用账号</em></span>
+        <input type="text" id="smtpFrom" class="txt" placeholder="QuickNote &lt;me@qq.com&gt;" spellcheck="false">
+      </div>
+      <div class="row">
+        <span class="grow line"><b>默认收件人</b><em>规则里没填时用这个</em></span>
+        <input type="text" id="smtpTo" class="txt" placeholder="me@qq.com" spellcheck="false">
+      </div>
+      <div class="row">
+        <span class="grow line"><b>超时</b><em>超过就记一次失败，不重试</em></span>
+        <input type="number" id="smtpTimeout" min="5" max="60" class="num">
+        <span class="unit">秒</span>
+      </div>
+      <div class="row">
+        <span class="grow"></span>
+        <button class="plain" id="btnSmtpTest">发一封测试邮件</button>
       </div>
     </section>
 

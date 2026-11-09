@@ -2,8 +2,9 @@
 
 > 状态：**已评审通过，分期实施中**。
 > 进度：**P1 已完成**（v4 迁移 / 事项 CRUD / 待办页 / 列表分类型，commit `06b4dc0`）；
-> **P2 已完成**（规则面板 / `next_fire_at` / tick / 幂等 / 错过判定 / 托盘提示）。
-> P3（SMTP / Webhook / 外部程序三种投递 + 设置页 + 开机自启）、P4（`.qntodo` 导入导出）未开始。
+> **P2 已完成**（规则面板 / `next_fire_at` / tick / 幂等 / 错过判定 / 托盘提示）；
+> **P3 已完成**（SMTP / Webhook / 外部程序三种投递 + 设置页 + 开机自启 + 规则级通道开关）。
+> P4（`.qntodo` 导入导出）未开始。
 > 影响面：数据库 v3 → v4、新增一个便签类型与一个页面、主进程新增调度与投递。
 > 相关文件：`lib/store.ahk`、`lib/note-window.ahk`、`note.ahk`、`ui/note.js`、`docs/ipc.md`。
 
@@ -371,7 +372,10 @@ Run('"' exe '"' args, , "Hide")
 
 子进程**不直接写 SQLite**。两个进程同时写同一个库会撞 `SQLITE_BUSY`，而现有 `sqlite.ahk` 封装没设 busy timeout，一撞就是报错。
 
-流程：子进程把结果写成 `data\notify\<fire_id>.json`（`{ok, code, detail, ms}`），主进程下一次 tick 扫这个目录回写 `todo_fires` 然后删除文件。这个方向与项目现有的 IPC 哲学一致：**跨进程只传事实，不共享状态**。
+流程：主进程把**作业**写成 `data\notify\<fire_id>.job.json`（通道清单 + 订阅者 + 规则快照），起子进程 `note.ahk --notify <job> --result <res> --data-dir <dir>`；子进程跑完把**回执**写到 `<fire_id>.res.json`（`{fireId, ok, detail, ms}`），主进程下一次 tick 调 `Notify.Collect()` 扫这个目录回写 `todo_fires`，然后把 job 和 res 都删掉。
+回执只更新 `state='sending'` 的行 —— 重启后残留的旧回执不会覆盖已经判过超时的记录。
+这个方向与项目现有的 IPC 哲学一致：**跨进程只传事实，不共享状态**。
+子进程走的是 `App.Main()` 里**单实例锁之前**的分支，只读作业文件、发请求、写结果，不建窗口、不开数据库。
 
 ### 6.4 凭证
 
