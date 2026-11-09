@@ -61,6 +61,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 便签快捷键 | 最多 10 张便签各挂一个全局热键，一键呼到最前（再按收起），列表里带角标；没有设的便签行为不变 |
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
 | **待办便签** | **一种新的便签类型：一张便签里装一列事项，每件事有自己的标题、正文、状态、计划/截止时间和顺序** —— 跟普通便签同一个窗口、同一套外观，列表里靠徽标和「3/7」进度区分。详见下面的[待办便签](#待办便签) |
+| **到点提醒** | **每条事项可挂多条规则：按「开始/截止」提前 N 分钟，或「开始前 N 天，每天几点」。到点弹托盘提示**；10 分钟内的迟到补发，更早的只记一条 `missed` 备查，不会开机后被十几条旧提醒淹没。详见[待办便签](#待办便签) |
 | 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用、链接、代码块、分割线 |
 | 代码着色 | 代码块自动上色（本地 highlight.js，离线可用）；右键「代码语言」可手动指定，语言跟着块走 —— 可视化 ⇄ Markdown 源码来回切、反复重画都不丢；导出 HTML 也带着颜色 |
 | **代码一键复制** | 鼠标移到代码块上，右上角浮出「复制」按钮，点一下整段代码进剪贴板（换行是 CRLF，粘进记事本也是一行一行）；右键菜单里也有「复制这段代码」，按钮被滚走时用它 |
@@ -107,6 +108,30 @@ runtime\AutoHotkey64.exe note.ahk
 
 三个阶段标志（**逾期 / 即将到期 / 进行中（自动）**）都是显示时现算的，不落库：改成"存进库"就得处理
 "电脑关机三天再开机，库里那批逾期状态怎么补算"的问题，不划算。
+
+#### 提醒
+
+`⋮` →「提醒设置…」在页面里展开一块规则面板（行内，不弹系统对话框），两种规则：
+
+| 规则 | 写法 | 语义 |
+|---|---|---|
+| 提前 | 「开始 / 截止」前 N 分钟（单位可选分钟/小时/天） | **一次性**。响过就停，面板上显示「已提醒过，不会再触发」 |
+| 每天 | 开始前 N 天起，每天 `HH:MM` | 到计划开始时间即自动停止；关机错过的日子直接跳过，不补一屏 |
+
+| 行为 | 说明 |
+|---|---|
+| 到点 | 主进程每 5 秒扫一次，到点弹**托盘提示**（非阻塞；模态框会冻住整个程序） |
+| 迟到 ≤10 分钟 | **补发**，`todo_fires.detail` 标 `late` |
+| 迟到 >10 分钟 | 不发，只记一条 `missed` 并写明晚了多久 —— 早上开机收到十几条昨晚的提醒只会让人把提醒关掉 |
+| 同一时刻 | 唯一索引挡住重复，重启/时钟来回拨都不会重复响 |
+| 事项完成 / 取消 | 它的规则全部停掉；**改回未完成不会自动复活**（"我明明关掉的提醒又响了"是投诉） |
+| 加规则时时间已过 | 当场提示「这个提醒时间已经过了，不会触发」，不等 10 分钟后悄悄记一条 `missed` |
+| 排不上 | 没设计划开始时间就加「每天」规则，面板会写明原因，补上时间就能用 |
+
+`todo_fires` 表就是提醒历史：哪天几点、哪个通道、返回了什么，出问题能直接查。
+
+> 边界：**程序没跑就不会响**。这是进程内调度的固有代价，开机自启（P3 的设置项）能缩小这个窗口，
+> 但没法消除。SMTP / Webhook / 外部程序三种投递通道（P3）和导入导出包（P4）还没做。
 
 > 便签正文区显示的是 `todos` 表的**只读派生摘要**（`- [ ] 标题` 清单）。数据层直接拦住了
 > 对 `kind='todo'` 便签的 `SaveBody`（返回 0），所以不会出现"两边各写一份、谁也不服谁"。
@@ -441,6 +466,7 @@ wv2-notes/
 │  ├─ sqlite.ahk         SQLite 封装（优先用系统 winsqlite3.dll）
 │  ├─ store.ahk          数据访问层（表结构、CRUD、搜索、排序 + 过滤）
 │  ├─ todo-store.ahk     ★ 待办事项数据层（todos / todo_reminders / todo_fires，含 seq 排序与派生摘要）
+│  ├─ reminder.ahk       ★ 提醒调度内核（规则→next_fire_at、tick、幂等、错过判定；可注入假时钟）
 │  ├─ note-window.ahk    一张便签 = 一个 Gui + 一个 WebView2（含两套右键菜单）
 │  ├─ list-window.ahk    列表面板（单例；含排序/过滤/多选批量的宿主侧）
 │  ├─ settings-window.ahk 设置面板（单例 WebView2，ui\settings.*）
@@ -467,12 +493,13 @@ wv2-notes/
 ├─ tools/                冒烟测试、端到端测试、图标生成
 │  ├─ _run-st.sh         ★ 自检批跑器：一条命令跑一组 --selftest-*，只打结论行
 │  ├─ probe-todo.ahk     ★ 待办数据层探针（不需要 WebView2，含 v3 老库升级用例）
+│  ├─ probe-remind.ahk   ★ 提醒引擎探针（不需要 WebView2，假时钟跑跨日/错过/幂等）
 │  ├─ ipc-send.ahk       ★ 外部调用示例（AHK，独立可拷走）
 │  └─ ipc-send.py        ★ 外部调用示例（Python，含回执）
 ├─ tests/md.test.js      Markdown 单测
 └─ docs/
    ├─ ipc.md             ★ 外部调用协议文档
-   └─ todo-design.md     ★ 待办便签设计方案（分四期，当前已完成 P1）
+   └─ todo-design.md     ★ 待办便签设计方案（分四期，当前已完成 P1 / P2）
 ```
 
 ---
@@ -484,7 +511,7 @@ wv2-notes/
 # DATA 固定落在 data\_st，绝不碰你自己的库。
 bash tools/_run-st.sh rich edit codelang codecopy note import \
                         export image batch settings pdf docx \
-                        list del font hotkey opacity showall todo
+                        list del font hotkey opacity showall todo remind
 
 # Markdown 渲染 / 纯文本提取 / 标题提取
 node tests/md.test.js
@@ -512,6 +539,11 @@ runtime\AutoHotkey64.exe tools\probe-menu.ahk
 # 待办数据层：建表/迁移、事项 CRUD、seq 排序与重编号、派生摘要、关联失效、
 #              v3 老库升级（52 项断言，很快，不需要 WebView2）
 runtime\AutoHotkey64.exe tools\probe-todo.ahk
+
+# 提醒引擎：offset/daily 两种规则的时间推算、跨日与"已过点跳过"、10 分钟宽限的两侧边界、
+#          同一时刻反复 tick 只一条、时钟来回拨、终态停规则、消息文案（69 项断言，很快，
+#          不需要 WebView2 —— 时间全靠 Reminder.Clock 注入）
+runtime\AutoHotkey64.exe tools\probe-remind.ahk
 
 # JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界 / 键存在性（35 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-json.ahk
@@ -594,6 +626,11 @@ runtime\AutoHotkey64.exe note.ahk --selftest-docx
 #              （53 项断言，约 8 秒）。它会真的建一张待办便签再删掉，还会写一个 v3 老库样本，
 #              所以务必配独立 --data-dir，别拿日常库跑
 runtime\AutoHotkey64.exe note.ahk --data-dir data\_st --selftest-todo
+
+# 程序级自检：提醒规则 —— 面板加/删/开关、卡片脚部条数、到点才发、同一时刻不重复、
+#              补发与错过、终态停止、默认托盘通道（33 项断言，约 7 秒）
+#              会自己关掉 5 秒定时器并注入假时钟，跑完还原
+runtime\AutoHotkey64.exe note.ahk --data-dir data\_st --selftest-remind
 
 # 程序级自检：设置面板（开窗 + 读值 + 颜色色块 + 拖大窗口重铺 +
 #              保存生效 + 非法热键拦截）

@@ -4,6 +4,7 @@
 ; 无人值守跑测试时就永久卡住（probe-list 就踩过）。#Include 是 include-once，
 ; 调用方重复 include 不会出问题。
 #Include clip.ahk
+#Include reminder.ahk
 ; ============================================================================
 ;  note-window.ahk —— 一张便签 = 一个 Gui + 一个 WebView2
 ;
@@ -228,6 +229,17 @@ class NoteWindow {
                     this.DoItemTimes(raw)
                 case "todo-move":
                     this.DoItemMove(raw)
+                /* ---- 提醒规则（P2）-----------------------------------------
+                   规则增删改之后一律重推两样东西：这条事项的规则清单（面板要
+                   刷新）和整表事项（卡片脚部的「提醒 N 条」要变）。 */
+                case "rem-get":
+                    this.PushRules(JsonNum(raw, "id"))
+                case "rem-add":
+                    this.DoRemAdd(raw)
+                case "rem-del":
+                    this.DoRemDel(raw)
+                case "rem-on":
+                    this.DoRemOn(raw)
                 case "todo-del":
                     this.menuItem := JsonNum(raw, "id")
                     SetTimer(ObjBindMethod(this, "ConfirmDeleteItem"), -10)
@@ -365,6 +377,8 @@ class NoteWindow {
             out .= ',"link_note_id":' it.link_note_id
             out .= ',"link_title":' JsonQuote(it.link_title)
             out .= ',"link_ok":' it.link_ok
+            out .= ',"rem_count":' it.rem_count
+            out .= ',"rem_next":' it.rem_next
             out .= ',"seq":' it.seq
             out .= "}"
         }
@@ -467,6 +481,76 @@ class NoteWindow {
     DoItemMove(raw) {
         id := JsonNum(raw, "id")
         TodoStore.MoveTo(this.id, id, JsonNum(raw, "idx", 1))
+        this.PushItems()
+    }
+
+    ; ---- 提醒规则 -----------------------------------------------------------
+
+    /* 一条事项的规则清单。序列化放在宿主侧（页面里没有库），字段全是原样
+       数字/字符串，页面不用再解析。 */
+    static RulesJson(todoID) {
+        out := "["
+        i := 0
+        for r in Reminder.ForTodo(todoID) {
+            if (i > 0)
+                out .= ","
+            i += 1
+            out .= '{"id":' r.id
+            out .= ',"kind":' JsonQuote(r.kind)
+            out .= ',"anchor":' JsonQuote(r.anchor)
+            out .= ',"offset_min":' r.offset_min
+            out .= ',"at_time":' JsonQuote(r.at_time)
+            out .= ',"days_before":' r.days_before
+            out .= ',"enabled":' r.enabled
+            out .= ',"next_at":' r.next_fire_at
+            out .= ',"last_at":' r.last_fired_at
+            out .= ',"text":' JsonQuote(r.text)
+            out .= ',"next_text":' JsonQuote(r.next_text)
+            out .= ',"stop":' JsonQuote(r.stop)
+            out .= "}"
+        }
+        return out "]"
+    }
+
+    PushRules(todoID) {
+        this.Send('{"type":"rem-list","id":' todoID
+            . ',"rules":' NoteWindow.RulesJson(todoID) "}")
+    }
+
+    DoRemAdd(raw) {
+        id := JsonNum(raw, "id")
+        if !TodoStore.Get(id)
+            return
+        res := Reminder.Add(id, Map(
+            "kind", JsonStr(raw, "kind", "offset"),
+            "anchor", JsonStr(raw, "anchor", "start"),
+            "offset_min", JsonNum(raw, "offset"),
+            "at_time", JsonStr(raw, "at_time", "09:00"),
+            "days_before", JsonNum(raw, "days")))
+        /* 排不上或时间已经过去：当场说清楚，而不是等 10 分钟后悄悄记一条 missed */
+        warn := IsObject(res) ? res.warn : "没能加进去"
+        this.Send('{"type":"rem-warn","text":' JsonQuote(warn) '}')
+        this.PushRules(id)
+        this.PushItems()
+    }
+
+    DoRemDel(raw) {
+        rid := JsonNum(raw, "id")
+        r := Reminder.Get(rid)
+        if !r
+            return
+        Reminder.Delete(rid)
+        this.PushRules(r.todo_id)
+        this.PushItems()
+    }
+
+    DoRemOn(raw) {
+        rid := JsonNum(raw, "id")
+        r := Reminder.Get(rid)
+        if !r
+            return
+        Reminder.SetEnabled(rid, JsonNum(raw, "on") ? 1 : 0)
+        this.PushRules(r.todo_id)
         this.PushItems()
     }
 
@@ -902,6 +986,7 @@ class NoteWindow {
         m.Add("Markdown 源码…", NoteWindow.MB(ObjBindMethod(this, "CmdItem", "todo-md", id)))
         m.Add("状态", sub)
         m.Add("计划 / 截止时间…", NoteWindow.MB(ObjBindMethod(this, "CmdItem", "todo-time", id)))
+        m.Add("提醒设置…", NoteWindow.MB(ObjBindMethod(this, "CmdItem", "todo-rem", id)))
         m.Add("关联便签…", NoteWindow.MB(ObjBindMethod(this, "AskLink", id)))
         m.Add()
         /* 上下移：菜单里也给一份。拖动在事项很多、或者窗口很窄的时候并不好用 */

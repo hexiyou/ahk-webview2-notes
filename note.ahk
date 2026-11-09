@@ -125,6 +125,9 @@ class App {
         /* 待办数据层复用同一条 SQLite 连接：主线程是唯一写入者，不另开连接
            （另开会多一份 WAL 读写者，等于自己跟自己抢锁）。 */
         TodoStore.Attach(App.Store)
+        /* 提醒引擎也复用同一条连接。Attach 顺手把"事项时间变了→重算规则"
+           的钩子挂到 TodoStore 上。 */
+        Reminder.Attach(App.Store)
         ; PDF 导出要自己建一个隐藏的 WebView2，路径跟便签窗口共用一套
         Pdf.Ctx := App.Ctx
 
@@ -149,6 +152,10 @@ class App {
         App.Log("托盘/热键/锚点就绪，开始装载便签")
         App.Boot()
         App.Log("Boot 返回，窗口数=" NoteWindow.All.Count)
+
+        /* 提醒调度。5 秒一次是有意的：1 秒太费电，30 秒会让人觉得"到点没响"。
+           tick 里全是带索引的轻量查询，500 条事项也不到毫秒级。 */
+        SetTimer(ObjBindMethod(App, "TickReminders"), 5000)
 
         /* 启动行为（设置面板里可改）。等 Boot 把窗口建完再动作，
            否则会和 BootTick 抢着建窗口。 */
@@ -214,6 +221,8 @@ class App {
             SetTimer(SelfTestDocx, -2500)
         if App.HasArg("--selftest-todo")
             SetTimer(SelfTestTodo, -2500)
+        if App.HasArg("--selftest-remind")
+            SetTimer(SelfTestRemind, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -250,6 +259,24 @@ class App {
     ; ========================================================================
     ;  便签的创建 / 装载
     ; ========================================================================
+
+    /* 提醒调度的一次心跳。异常必须在这里吃掉：AHK 的未捕获异常会弹模态框，
+       那个框会冻住所有便签窗口（单 UI 线程），一次数据库抖动就能让用户
+       以为程序死了。 */
+    static TickOn := 1
+
+    static TickReminders() {
+        /* 自检会把定时器关掉自己拨假时钟驱动 —— 两边同时 tick 会抢时序，
+           断言就变成了"看谁先跑"。 */
+        if !App.TickOn
+            return 0
+        try {
+            Reminder.Tick()
+        } catch as e {
+            App.Log("提醒调度出错：" CleanComError(e.Message))
+        }
+        return 1
+    }
 
     static Boot() {
         notes := App.Store.Visible()
@@ -4514,6 +4541,191 @@ NoteOnError(e, mode) {
     if (App.LogPath = "")           ; 还没走到设日志那步，直接落程序目录
         NoteCrash(msg)
     return 1        ; 1 = 已处理，不弹模态框（弹了整个 UI 线程就冻住了）
+}
+
+/* ============================================================================
+   自检：提醒规则（P2）
+   —— 页面部分验"面板能不能加/删/开关、卡片上的条数对不对"；
+      引擎部分验"到点才发、同一时刻只发一次、补发与错过、终态就停"。
+      引擎用注入的假时钟驱动，不等真实时间。
+   ========================================================================== */
+SelfTestRemind() {
+    try SelfTestRemindRun()
+    catch as e {
+        App.Log("SELFTEST REMIND 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST REMIND 结论：未通过（异常）")
+    } finally {
+        /* 不管怎么退出都要把定时器和假时钟还原，否则同一个进程里后续
+           自检会继承一个停在过去的时钟。 */
+        Reminder.Clock := 0
+        App.TickOn := 1
+        /* 必须走 App.Quit()：裸退出会跳过 WebView2 controller 的 Close，
+           进程在后台滞留几十秒还占着单实例互斥锁 —— 紧跟着跑下一个自检
+           就会被"已经有一个实例在跑"顶掉。 */
+        SelfTestDone()
+    }
+}
+
+SelfTestRemindRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    App.TickOn := 0                     ; 定时器会跟"手动 tick + 假时钟"抢时序
+    Reminder.Clock := 0
+    base := Store.Now()
+
+    w := App.NewTodoNote(Map("activate", 0))
+    if !w {
+        App.Log("SELFTEST REMIND 没能建出待办便签")
+        return
+    }
+    Loop 60 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("待办便签页面就绪", w.ready = 1, w.ready)
+    Loop 30 {
+        if (TodoStore.Count(w.id) >= 1)
+            break
+        Sleep 100
+    }
+    it := TodoStore.Items(w.id)[1]
+    RichSay("自动建了第一条事项", IsObject(it), TodoStore.Count(w.id))
+
+    ; ---- 1. 面板 ----------------------------------------------------------
+    RichEval(w, "__todo.openRem(0)")
+    Sleep 250
+    RichSay("能打开提醒面板", JStr(RichEval(w, "__todo.remOpen()")) = "1")
+    RichSay("一开始没有规则", JStr(RichEval(w, "__todo.remRows()")) = "0"
+        , JStr(RichEval(w, "__todo.remRows()")))
+
+    ; 没设时间时加规则 → 面板要说清楚为什么排不上
+    RichEval(w, "__todo.remSet('offset','start',30,1)")
+    Sleep 400
+    RichSay("没设时间：面板给出提示"
+        , InStr(JStr(RichEval(w, "__todo.remHint()")), "计划开始") > 0
+        , JStr(RichEval(w, "__todo.remHint()")))
+    RichSay("提示归提示，规则还是加进去了", Reminder.ForTodo(it.id).Length = 1
+        , Reminder.ForTodo(it.id).Length)
+    ; 这条排不上的规则留着会干扰后面的计数，先删掉
+    RichEval(w, "__todo.remDel(0)")
+    Sleep 300
+    RichSay("能删掉规则", Reminder.ForTodo(it.id).Length = 0, Reminder.ForTodo(it.id).Length)
+
+    ; ---- 2. 加一条真的能响的 ----------------------------------------------
+    start := base + 3600
+    TodoStore.SetTimes(it.id, start, 0)
+    w.PushItems()
+    Sleep 250
+    it := TodoStore.Get(it.id)
+
+    RichEval(w, "__todo.remSet('offset','start',30,1)")
+    Loop 20 {
+        if (Reminder.ForTodo(it.id).Length >= 1)
+            break
+        Sleep 100
+    }
+    Sleep 200
+    rs := Reminder.ForTodo(it.id)
+    RichSay("点「加一条」真的落库", rs.Length = 1, rs.Length)
+    RichSay("规则描述：开始前 30 分钟", rs.Length && rs[1].text = "开始前 30 分钟"
+        , rs.Length ? rs[1].text : "?")
+    RichSay("排到开始前 30 分钟", rs.Length && rs[1].next_fire_at = start - 1800
+        , rs.Length ? Reminder.Text(rs[1].next_fire_at) : "?")
+    r1 := rs.Length ? rs[1] : 0
+    RichSay("面板上出现一行", JStr(RichEval(w, "__todo.remRows()")) = "1"
+        , JStr(RichEval(w, "__todo.remRows()")))
+    RichSay("面板文案对得上"
+        , InStr(JStr(RichEval(w, "__todo.remText(0)")), "开始前 30 分钟") > 0
+        , JStr(RichEval(w, "__todo.remText(0)")))
+    RichSay("卡片脚部显示提醒条数"
+        , InStr(JStr(RichEval(w, "__todo.foot(0)")), "提醒 1 条") > 0
+        , JStr(RichEval(w, "__todo.foot(0)")))
+
+    ; daily 也走一遍 UI（单位/天数在页面侧换算）
+    RichEval(w, "__todo.remSet('daily','',0,1,1,'09:00')")
+    Sleep 500
+    RichSay("再加一条 daily", Reminder.ForTodo(it.id).Length = 2
+        , Reminder.ForTodo(it.id).Length)
+    RichSay("面板两行", JStr(RichEval(w, "__todo.remRows()")) = "2"
+        , JStr(RichEval(w, "__todo.remRows()")))
+
+    ; ---- 3. 开关 ----------------------------------------------------------
+    RichEval(w, "__todo.remToggle(0, false)")
+    Sleep 400
+    RichSay("勾掉一条：库里 enabled=0", Reminder.Get(r1.id).enabled = 0)
+    RichSay("卡片条数跟着减"
+        , InStr(JStr(RichEval(w, "__todo.foot(0)")), "提醒 1 条") > 0
+        , JStr(RichEval(w, "__todo.foot(0)")))
+    RichEval(w, "__todo.remToggle(0, true)")
+    Sleep 400
+    RichSay("再勾回来：enabled=1 且重新排上"
+        , Reminder.Get(r1.id).enabled = 1 && Reminder.Get(r1.id).next_fire_at = start - 1800
+        , Reminder.Text(Reminder.Get(r1.id).next_fire_at))
+
+    ; 删掉 daily，后面只留一条好算账
+    RichEval(w, "__todo.remDel(1)")
+    Sleep 400
+    RichSay("删掉 daily 只剩一条", Reminder.ForTodo(it.id).Length = 1
+        , Reminder.ForTodo(it.id).Length)
+
+    ; ---- 4. 引擎：到点才发 ------------------------------------------------
+    fireAt := Reminder.Get(r1.id).next_fire_at
+    Reminder.Clock := fireAt - 60
+    t := Reminder.Tick()
+    RichSay("差 1 分钟：不发", t.sent = 0, t.sent)
+    Reminder.Clock := fireAt
+    t := Reminder.Tick()
+    RichSay("到点：发一条并记 ok", t.sent = 1 && t.ok = 1, t.sent "/" t.ok)
+    t := Reminder.Tick()
+    RichSay("同一时刻再 tick：不重复", t.sent = 0, t.sent)
+    RichSay("触发历史只有一条", Reminder.db().Scalar(
+        "SELECT count(*) FROM todo_fires WHERE reminder_id=?", r1.id) = 1
+        , Reminder.db().Scalar("SELECT count(*) FROM todo_fires WHERE reminder_id=?", r1.id))
+    RichSay("offset 规则发完就停", Reminder.Get(r1.id).enabled = 0)
+    w.PushItems()
+    Sleep 250
+    RichSay("发完之后卡片不再显示提醒条数"
+        , InStr(JStr(RichEval(w, "__todo.foot(0)")), "提醒") = 0
+        , JStr(RichEval(w, "__todo.foot(0)")))
+
+    ; ---- 5. 错过 ----------------------------------------------------------
+    r2 := Reminder.Add(it.id, Map("kind", "offset", "anchor", "start", "offset_min", 120))
+    RichSay("新规则排在开始前 2 小时", r2.next = start - 7200, Reminder.Text(r2.next))
+    Reminder.Clock := start - 7200 + 601             ; 晚 601 秒
+    t := Reminder.Tick()
+    RichSay("晚 601 秒：只记 missed，不发", t.missed = 1 && t.ok = 0, t.missed "/" t.ok)
+    RichSay("missed 写清晚了多久", InStr(Reminder.db().Scalar(
+        "SELECT detail FROM todo_fires WHERE reminder_id=?", r2.id), "晚了") > 0
+        , Reminder.db().Scalar("SELECT detail FROM todo_fires WHERE reminder_id=?", r2.id))
+    RichSay("missed 之后规则停", Reminder.Get(r2.id).enabled = 0)
+
+    ; ---- 6. 终态 ----------------------------------------------------------
+    TodoStore.SetStatus(it.id, "done")
+    RichSay("事项完成：规则全停", Reminder.Get(r1.id).enabled = 0
+        && Reminder.Get(r2.id).enabled = 0)
+
+    ; ---- 7. 收尾 ----------------------------------------------------------
+    /* 默认通道是托盘提示（P2 只做这个，SMTP/Webhook 属于 P3）。走一遍真的
+       TrayTip：气泡不阻塞，跑在无人值守时也就闪一下。 */
+    res := Reminder._Tray({message: "自检：提醒通道可用", title: "自检"})
+    RichSay("默认通道（托盘提示）不报错", res.ok = 1, res.detail)
+
+    RichEval(w, "document.getElementById('rmpClose').click()")
+    Sleep 200
+    RichSay("点「关闭」收起面板", JStr(RichEval(w, "__todo.remOpen()")) = "0"
+        , JStr(RichEval(w, "__todo.remOpen()")))
+
+    delID := w.id
+    App.Store.Delete(delID)
+    RichSay("删待办便签连带清掉规则", Reminder.db().Scalar(
+        "SELECT count(*) FROM todo_reminders r JOIN todos t ON t.id=r.todo_id"
+        . " WHERE t.note_id=?", delID) = 0)
+    if NoteWindow.All.Has(delID) {
+        try NoteWindow.All[delID].Destroy()
+    }
+
+    App.Log("SELFTEST REMIND 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
 }
 
 /* ============================================================================

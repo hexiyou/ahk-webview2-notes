@@ -47,6 +47,7 @@ for t in "$@"; do
     pdf)       run_one pdf       pdf       "--selftest-pdf" ;;
     docx)      run_one docx      docx      "--selftest-docx" ;;
     todo)      run_one todo      todo      "--selftest-todo" ;;
+    remind)    run_one remind    remind    "--selftest-remind" ;;
     *) echo "未知标签：$t" ;;
   esac
 done

@@ -355,3 +355,105 @@
   background-color: rgba(0, 0, 0, .18);
 }
 .items::-webkit-scrollbar-thumb:hover { background-color: rgba(0, 0, 0, .3); }
+
+/* ---- 提醒规则面板 ------------------------------------------------------- */
+
+.rmp {
+  position: fixed;
+  z-index: 45;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  max-height: 70%;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(var(--note-rgb), .98);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .22), 0 0 0 1px rgba(0, 0, 0, .1);
+}
+.rmp[hidden] { display: none; }
+.rmp-head {
+  flex: 0 0 auto;
+  padding-bottom: 6px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid rgba(0, 0, 0, .08);
+}
+.rmp-head span { color: var(--fg); font-weight: 600; }
+
+.rmp-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+}
+.rmp-list:empty::after {
+  content: "还没有提醒。下面加一条，到点会弹托盘提示。";
+  display: block;
+  padding: 4px 2px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.rm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 2px;
+  font-size: 12px;
+}
+.rm input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+.rm-text { flex: 1 1 auto; min-width: 0; }
+.rm-text .rm-when { color: var(--fg-dim); }
+.rm-text .rm-when.over { color: #c0392b; }
+.rm-text .rm-stop { color: #a0522d; }
+.rm.off .rm-text { color: var(--fg-dim); text-decoration: line-through; }
+.rm-del {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.rm-del:hover { background: rgba(0, 0, 0, .1); color: #c0392b; }
+
+.rmp-add {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, .08);
+}
+.rmp-add select,
+.rmp-add input {
+  padding: 2px 4px;
+  border: 1px solid rgba(0, 0, 0, .16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .8);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+.rmp-add input[type="number"] { width: 52px; }
+.rmp-add input[type="time"] { width: 78px; }
+.rmp-row { display: flex; align-items: center; gap: 4px; }
+.rmp-row[hidden] { display: none; }
+.rmp-pre { font-size: 12px; color: var(--fg-dim); }
+.rmp-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 6px;
+}
+.rmp-hint { font-size: 11px; color: var(--fg-dim); }
+.rmp-hint.warn { color: #b9770e; }

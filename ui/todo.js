@@ -36,6 +36,11 @@
   const floatbar = $('floatbar');
   const tp = $('tp'), tpStart = $('tpStart'), tpDue = $('tpDue');
   const mdp = $('mdp'), mdpText = $('mdpText'), mdpName = $('mdpName');
+  const rmp = $('rmp'), rmpName = $('rmpName'), rmpList = $('rmpList');
+  const rmpHint = $('rmpHint'), rmKind = $('rmKind'), rmAdd = $('rmAdd');
+  const rmOffWrap = $('rmOffWrap'), rmDayWrap = $('rmDayWrap');
+  const rmAnchor = $('rmAnchor'), rmNum = $('rmNum'), rmUnit = $('rmUnit');
+  const rmDays = $('rmDays'), rmAt = $('rmAt');
   const lightbox = $('lightbox'), lightboxImg = $('lightboxImg');
   const codeCopy = $('codeCopy'), codeCopyText = $('codeCopyText');
 
@@ -50,6 +55,8 @@
     maxed: false,
     ready: false,
     mdId: 0,          // Markdown 面板正在编辑的事项
+    remId: 0,         // 提醒面板对应的事项
+    rules: [],        // 最近一次收到的规则清单
     tpId: 0,          // 时间弹层对应的事项
     pickId: 0         // 宿主文件框选图时"落到哪个事项"
   };
@@ -86,6 +93,8 @@
         case 'image-fail': onImageFail(msg); break;
         case 'image-in': onImageIn(msg.url); break;
         case 'pick-image': hint('用拖拽或 Ctrl+V 也能插图'); break;
+        case 'rem-list': renderRules(msg.id, msg.rules || []); break;
+        case 'rem-warn': setRemHint(msg.text || ''); break;
         case 'cmd': runCmd(msg.name, msg); break;
       }
     });
@@ -324,6 +333,11 @@
     if (it.status === 'done' && it.done_at) foot += (foot ? ' · ' : '') + '完成于 ' + fmtShort(it.done_at);
     if (it.status === 'canceled' && it.canceled_at) foot += (foot ? ' · ' : '') + '取消于 ' + fmtShort(it.canceled_at);
     if (!it.link_ok && it.link_note_id > 0) foot += (foot ? ' · ' : '') + '关联已失效';
+    if (it.rem_count > 0) {
+      let s = '提醒 ' + it.rem_count + ' 条';
+      s += it.rem_next > 0 ? ' · 下次 ' + fmtShort(it.rem_next) : ' · 待设置时间';
+      foot += (foot ? ' · ' : '') + s;
+    }
     card.footEl.textContent = foot;
     card.footEl.hidden = !foot;
   }
@@ -588,6 +602,111 @@
       s.value = s.value.slice(0, a) + '  ' + s.value.slice(b);
       s.selectionStart = s.selectionEnd = a + 2;
     }
+  });
+
+  /* ---- 提醒规则 --------------------------------------------------------- */
+
+  /* 面板只跟"一条事项"绑定，和 Markdown 面板同一套节奏：宿主是事实来源，
+     页面发指令、宿主改完库把整份规则清单推回来（rem-list），这里重画。 */
+  function setRemHint(text, warn) {
+    rmpHint.textContent = text || '';
+    rmpHint.classList.toggle('warn', !!warn || !!text);
+  }
+
+  function openRem(id) {
+    const c = cards.get(id);
+    if (!c) return;
+    state.remId = id;
+    rmpName.textContent = '· ' + (c.item.title || '（无标题）');
+    setRemHint('');
+    rmp.hidden = false;
+    /* 先清空再要数据：否则会有一瞬间显示上一条事项的规则，看着像串了 */
+    rmpList.innerHTML = '';
+    state.rules = [];
+    send({ type: 'rem-get', id: id });
+  }
+
+  function closeRem() {
+    rmp.hidden = true;
+    state.remId = 0;
+    state.rules = [];
+  }
+
+  function renderRules(id, rules) {
+    if (!state.remId || Number(id) !== Number(state.remId)) return;
+    state.rules = rules;
+    rmpList.innerHTML = '';
+    const now = Date.now();
+    rules.forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'rm' + (r.enabled ? '' : ' off');
+      row.dataset.id = r.id;
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!r.enabled;
+      cb.title = r.enabled ? '关掉这条提醒' : '重新打开这条提醒';
+      cb.addEventListener('change', () => {
+        send({ type: 'rem-on', id: r.id, on: cb.checked ? 1 : 0 });
+      });
+
+      const txt = document.createElement('span');
+      txt.className = 'rm-text';
+      txt.appendChild(document.createTextNode(r.text || ''));
+      if (r.stop) {
+        const st = document.createElement('span');
+        st.className = 'rm-stop';
+        st.textContent = ' · ' + r.stop;
+        txt.appendChild(st);
+      } else if (r.next_text) {
+        const over = r.next_at > 0 && r.next_at * 1000 < now;
+        const w = document.createElement('span');
+        w.className = 'rm-when' + (over ? ' over' : '');
+        w.textContent = ' · ' + (over ? '已过 ' : '下次 ') + r.next_text;
+        txt.appendChild(w);
+      }
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'rm-del';
+      del.textContent = '×';
+      del.title = '删掉这条提醒';
+      del.addEventListener('click', () => send({ type: 'rem-del', id: r.id }));
+
+      row.append(cb, txt, del);
+      rmpList.appendChild(row);
+    });
+  }
+
+  function remKindChanged() {
+    const daily = rmKind.value === 'daily';
+    rmOffWrap.hidden = daily;
+    rmDayWrap.hidden = !daily;
+  }
+
+  function addRule() {
+    if (!state.remId) return;
+    if (rmKind.value === 'daily') {
+      const days = Math.max(0, Math.min(60, Number(rmDays.value) || 0));
+      send({
+        type: 'rem-add', id: state.remId, kind: 'daily',
+        days: days, at_time: rmAt.value || '09:00'
+      });
+    } else {
+      const unit = Number(rmUnit.value) || 1;
+      const num = Math.max(0, Number(rmNum.value) || 0);
+      send({
+        type: 'rem-add', id: state.remId, kind: 'offset',
+        anchor: rmAnchor.value, offset: Math.min(43200, num * unit)
+      });
+    }
+  }
+
+  rmKind.addEventListener('change', remKindChanged);
+  rmAdd.addEventListener('click', addRule);
+  $('rmpClose').addEventListener('click', closeRem);
+  rmp.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeRem(); }
   });
 
   /* ---- 图片 ------------------------------------------------------------- */
@@ -1017,6 +1136,7 @@
       case 'save': saveAll(); break;
       case 'todo-add': addItem(); break;
       case 'todo-md': if (msg.item) openMd(msg.item); break;
+      case 'todo-rem': if (msg.item) openRem(msg.item); break;
       case 'todo-time': {
         const c = cards.get(msg.item);
         if (c) openTimePop(c.item.id, c.tmEl);
@@ -1173,6 +1293,48 @@
       openMd(Number(el.dataset.id));
       return 1;
     },
+    /* ---- 提醒 ---- */
+    openRem: i => {
+      const el = listEl.querySelectorAll('.ti')[i];
+      if (!el) return 0;
+      openRem(Number(el.dataset.id));
+      return 1;
+    },
+    remOpen: () => (rmp.hidden ? 0 : 1),
+    remRows: () => rmpList.querySelectorAll('.rm').length,
+    remText: i => (rmpList.querySelectorAll('.rm-text')[i] || {}).textContent || '',
+    remOn: i => {
+      const cb = rmpList.querySelectorAll('.rm input[type="checkbox"]')[i];
+      return cb && cb.checked ? 1 : 0;
+    },
+    /* 走真 UI：设好输入再点「加一条」，跟用户点是一回事 */
+    remSet: (kind, anchor, num, unit, days, at) => {
+      if (!state.remId) return 0;
+      rmKind.value = kind === 'daily' ? 'daily' : 'offset';
+      remKindChanged();
+      if (anchor) rmAnchor.value = anchor;
+      if (num !== undefined && num !== null) rmNum.value = String(num);
+      if (unit !== undefined && unit !== null) rmUnit.value = String(unit);
+      if (days !== undefined && days !== null) rmDays.value = String(days);
+      if (at) rmAt.value = at;
+      addRule();
+      return 1;
+    },
+    remDel: i => {
+      const b = rmpList.querySelectorAll('.rm-del')[i];
+      if (!b) return 0;
+      b.click();
+      return 1;
+    },
+    remToggle: (i, on) => {
+      const cb = rmpList.querySelectorAll('.rm input[type="checkbox"]')[i];
+      if (!cb) return 0;
+      cb.checked = !!on;
+      cb.dispatchEvent(new Event('change'));
+      return 1;
+    },
+    remHint: () => rmpHint.textContent,
+    foot: i => (listEl.querySelectorAll('.ti-foot')[i] || {}).textContent || '',
     mdValue: () => mdpText.value,
     setMd: v => { mdpText.value = v; applyMd(); return 1; },
     mdOpen: () => (mdp.hidden ? 0 : 1),

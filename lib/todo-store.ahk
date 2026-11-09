@@ -22,6 +22,10 @@ class TodoStore {
     static STATUSES := ["todo", "doing", "done", "canceled"]
     static SEQ_STEP := 1000
     static SOFT_MAX := 500                         ; 单页事项软上限（UI 层提示，不是库限制）
+    /* 事项时间变了 → 提醒规则要重算。留成 static 字段由 reminder.ahk 在
+       Attach 时挂上，而不是直接调 Reminder：probe-todo 这类只测数据层的
+       探针不加载 reminder.ahk，硬引用会当场报错。0 = 没有提醒引擎。 */
+    static OnTimesChange := 0
 
     static Attach(store) => TodoStore.S := store
     static db() => TodoStore.S.db
@@ -30,10 +34,16 @@ class TodoStore {
 
     /* 一个待办便签下的全部事项，按 seq 排。
        关联便签的标题随行查出来（LEFT JOIN），避免渲染时 N+1 次查询；
-       被关联的便签已经删了就是空串，页面据此打「关联已失效」。 */
+       被关联的便签已经删了就是空串，页面据此打「关联已失效」。
+       提醒条数与"下次什么时候响"也一起带出来（P2）：卡片脚部要显示
+       「提醒 2 条 · 下次 11-10 08:30」，为此再单独跑一次查询不值当。 */
     static Items(noteID) {
-        rows := TodoStore.db().Query("SELECT t.*, n.title AS link_title FROM todos t"
-            . " LEFT JOIN notes n ON n.id = t.link_note_id"
+        rows := TodoStore.db().Query("SELECT t.*, n.title AS link_title,"
+            . " (SELECT count(*) FROM todo_reminders r WHERE r.todo_id=t.id AND r.enabled=1)"
+            . " AS rem_count,"
+            . " (SELECT min(r.next_fire_at) FROM todo_reminders r WHERE r.todo_id=t.id"
+            . " AND r.enabled=1 AND r.next_fire_at>0) AS rem_next"
+            . " FROM todos t LEFT JOIN notes n ON n.id = t.link_note_id"
             . " WHERE t.note_id=? ORDER BY t.seq, t.id", noteID)
         out := []
         for r in rows
@@ -42,8 +52,13 @@ class TodoStore {
     }
 
     static Get(id) {
-        rows := TodoStore.db().Query("SELECT t.*, n.title AS link_title FROM todos t"
-            . " LEFT JOIN notes n ON n.id = t.link_note_id WHERE t.id=?", id)
+        rows := TodoStore.db().Query("SELECT t.*, n.title AS link_title,"
+            . " (SELECT count(*) FROM todo_reminders r WHERE r.todo_id=t.id AND r.enabled=1)"
+            . " AS rem_count,"
+            . " (SELECT min(r.next_fire_at) FROM todo_reminders r WHERE r.todo_id=t.id"
+            . " AND r.enabled=1 AND r.next_fire_at>0) AS rem_next"
+            . " FROM todos t LEFT JOIN notes n ON n.id = t.link_note_id"
+            . " WHERE t.id=?", id)
         return rows.Length ? TodoStore._Row(rows[1]) : 0
     }
 
@@ -198,6 +213,21 @@ class TodoStore {
         } catch as e {
             try db.Rollback()
             throw e
+        }
+        /* 事务提交之后再重算提醒：时间改了，锚点就变了，不重算的话
+           规则会按旧时间点响（或者永远不响）。 */
+        TodoStore._TimesChanged(it.note_id)
+        return 1
+    }
+
+    /* 通知提醒引擎"这张便签下的事项时间变了"。没有引擎时什么也不做。 */
+    static _TimesChanged(noteID) {
+        if !IsObject(TodoStore.OnTimesChange)
+            return 0
+        try {
+            TodoStore.OnTimesChange.Call(noteID)
+        } catch {
+            ; 重算失败不该影响保存本身 —— 下一次 tick 的 RefreshAll 会兜住
         }
         return 1
     }
@@ -386,6 +416,10 @@ class TodoStore {
                Store.Delete 会把它清零，这里是"库被手改过"时的兜底。 */
             link_title: TodoStore._get(m, "link_title", ""),
             link_ok: (linkID > 0 && TodoStore._get(m, "link_title", "") != "") ? 1 : 0,
+            /* 提醒摘要（P2）。rem_next = 0 表示"有规则但当前都排不上"
+               （没设时间 / 都已发过），页面据此区分「提醒 2 条」和「提醒 2 条 · 待设置」。 */
+            rem_count: TodoStore._num(m, "rem_count"),
+            rem_next: TodoStore._num(m, "rem_next"),
             created_at: TodoStore._num(m, "created_at"),
             updated_at: TodoStore._num(m, "updated_at")
         }

@@ -100,6 +100,44 @@
     </div>
   </div>
 
+  <!-- 提醒规则。和「时间」一样走行内面板：便签最窄只有 180px，系统对话框
+       会把它撑得没法看。规则只有两种（提前 N / 每天），所以不做成通用表单。 -->
+  <div class="rmp" id="rmp" hidden>
+    <div class="rmp-head">提醒 <span id="rmpName"></span></div>
+    <div class="rmp-list" id="rmpList"></div>
+    <div class="rmp-add">
+      <select id="rmKind" title="提醒方式">
+        <option value="offset">提前</option>
+        <option value="daily">每天提醒</option>
+      </select>
+      <span id="rmOffWrap" class="rmp-row">
+        <select id="rmAnchor" title="以哪个时间为准">
+          <option value="start">开始</option>
+          <option value="due">截止</option>
+        </select>
+        <span class="rmp-pre">前</span>
+        <input id="rmNum" type="number" min="0" max="43200" step="1" value="30" title="提前量">
+        <select id="rmUnit" title="单位">
+          <option value="1">分钟</option>
+          <option value="60">小时</option>
+          <option value="1440">天</option>
+        </select>
+      </span>
+      <span id="rmDayWrap" class="rmp-row" hidden>
+        <span class="rmp-pre">开始前</span>
+        <input id="rmDays" type="number" min="0" max="60" step="1" value="1" title="提前几天开始">
+        <span class="rmp-pre">天，每天</span>
+        <input id="rmAt" type="time" value="09:00" title="每天几点">
+      </span>
+      <button id="rmAdd" class="primary" type="button">加一条</button>
+    </div>
+    <div class="rmp-foot">
+      <span class="rmp-hint" id="rmpHint"></span>
+      <span class="grow"></span>
+      <button id="rmpClose" class="ghost" type="button">关闭</button>
+    </div>
+  </div>
+
   <div class="lightbox" id="lightbox" hidden>
     <img id="lightboxImg" alt="">
   </div>
