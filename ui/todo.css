@@ -513,3 +513,32 @@
 }
 
 .rmp-in[hidden] { display: none; }
+
+/* ---- 「运行程序」这一组的框 ---------------------------------------------
+   画个左边线 + 浅底，把它和上面那行「邮件 / Webhook / 运行程序」分开：
+   「等它跑完」只吃这一个程序，混在一行里会被当成"三种通道都等"。 */
+.rmp-run {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 0 22px;       /* 22px 让左线对齐上方的复选框文字 */
+  padding: 4px 0 2px 8px;
+  border-left: 3px solid rgba(44, 111, 187, .35);
+  background: rgba(44, 111, 187, .04);
+  border-radius: 0 6px 6px 0;
+}
+
+.rmp-run[hidden] { display: none; }
+
+.rmp-run-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rmp-run-tip {
+  font-size: 11px;
+  color: var(--fg-dim);
+}

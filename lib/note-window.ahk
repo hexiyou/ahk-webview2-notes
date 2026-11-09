@@ -855,27 +855,29 @@ class NoteWindow {
         return (*) => fn.Call()
     }
 
-    ShowMenu() {
+    ShowMenu(dry := 0) {
         /* 三套菜单。页面按落点给 zone：
              标题栏 / 工具栏 / 底栏 → note  这张便签怎么处理
              正文编辑区            → edit  这段文字怎么编辑
              图片（大图预览 / 正文里的图）→ image  这张图怎么处理
              待办便签里的某个事项   → todo  这个事项怎么处理
-           在正文里右键却弹出"删除这张便签"是最容易误点的组合，所以必须分开。 */
+           在正文里右键却弹出"删除这张便签"是最容易误点的组合，所以必须分开。
+
+           dry 只给自检用：菜单建出来但不弹（见 FinishMenu）。 */
         if (this.menuZone = "todo") {
-            this.ShowTodoItemMenu()
+            this.ShowTodoItemMenu(dry)
             return
         }
         if (this.menuZone = "image") {
-            this.ShowImageMenu()
+            this.ShowImageMenu(dry)
             return
         }
         if (this.menuZone = "edit") {
-            this.ShowEditMenu()
+            this.ShowEditMenu(dry)
             return
         }
         if (this.kind = "todo") {
-            this.ShowTodoNoteMenu()
+            this.ShowTodoNoteMenu(dry)
             return
         }
         isMd := (this.note.mode = "md")
@@ -950,7 +952,7 @@ class NoteWindow {
         m.Add()
         m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
         m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     /* 待办便签的"这张便签"菜单。和普通便签共用同一套窗口能力（置顶/颜色/
@@ -967,8 +969,9 @@ class NoteWindow {
         App.ImportTodoPack(this.id, mode)
     }
 
-    ShowTodoNoteMenu() {
-        m := Menu()        m.Add("新事项`tCtrl+Enter", NoteWindow.MB(ObjBindMethod(this, "Cmd", "todo-add")))
+    ShowTodoNoteMenu(dry := 0) {
+        m := Menu()
+        m.Add("新事项`tCtrl+Enter", NoteWindow.MB(ObjBindMethod(this, "Cmd", "todo-add")))
         m.Add("新建待办便签", (*) => App.NewTodoNote())
         m.Add()
         /* 待办包：导出是"留底"，导入是"换机器 / 合列表"。
@@ -1012,6 +1015,17 @@ class NoteWindow {
         m.Add()
         m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
         m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
+        NoteWindow.FinishMenu(m, dry)
+    }
+
+    /* 建完菜单的收尾。dry=1 只建不弹，给自检用。
+       为什么需要它：菜单是**运行时**在宿主线程里现搭的，任何一行写错
+       （比如两条语句粘在一行、回调签名不匹配）都表现为"点菜单毫无反应"，
+       而这类错误 `--check` 一条警告都不会给 —— 只有真去建一次才暴露。
+       详见 README「两条语句粘在一行」。 */
+    static FinishMenu(m, dry) {
+        if dry
+            return
         m.Show()
     }
 
@@ -1019,7 +1033,7 @@ class NoteWindow {
          · 点状态胶囊 → kind=status（只给状态子菜单，少点两下）
          · 点 ↗ 但还没关联 → kind=link（直接进"选择便签"）
          · 点 ⋮ / 在事项里右键 → kind=item（全量） */
-    ShowTodoItemMenu() {
+    ShowTodoItemMenu(dry := 0) {
         id := this.menuItem
         it := TodoStore.Get(id)
         if !it
@@ -1027,7 +1041,7 @@ class NoteWindow {
         kind := this.menuKind
 
         if (kind = "link") {
-            this.AskLink(id)
+            this.AskLink(id, dry)
             return
         }
 
@@ -1039,7 +1053,7 @@ class NoteWindow {
                 sub.Check(p[2])
         }
         if (kind = "status") {
-            sub.Show()
+            NoteWindow.FinishMenu(sub, dry)
             return
         }
 
@@ -1076,7 +1090,7 @@ class NoteWindow {
         }
         m.Add()
         m.Add("删除这个事项…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDeleteItem")))
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     /* 「代码语言」：菜单在宿主侧，页面拿不到光标，所以先把光标放回那块 <pre>
@@ -1103,7 +1117,7 @@ class NoteWindow {
 
     /* 关联便签：列出现有普通便签。待办便签自己不在候选里 —— 关联到另一张
        待办便签没有意义（点 ↗ 只会跳到另一个列表）。 */
-    AskLink(id) {
+    AskLink(id, dry := 0) {
         it := TodoStore.Get(id)
         if !it
             return
@@ -1119,7 +1133,7 @@ class NoteWindow {
             if (n.id = it.link_note_id)
                 m.Check(label)
         }
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     /* 待办页的 cmd：带上事项 id，页面据此决定作用于哪一张卡片 */
@@ -1136,7 +1150,7 @@ class NoteWindow {
     /* 正文里的右键菜单：全是"编辑这段文字"的动作。
        每一项都只是 postMessage 一条 cmd 回页面去执行 —— 菜单是原生菜单，
        点下去的瞬间页面已经没有用户手势了，直接调 Clipboard API 会被拒。 */
-    ShowEditMenu() {
+    ShowEditMenu(dry := 0) {
         m := Menu()
         m.Add("撤销`tCtrl+Z", NoteWindow.MB(ObjBindMethod(this, "Cmd", "undo")))
         m.Add("重做`tCtrl+Y", NoteWindow.MB(ObjBindMethod(this, "Cmd", "redo")))
@@ -1166,7 +1180,7 @@ class NoteWindow {
         m.Add("插入图片…", NoteWindow.MB(ObjBindMethod(this, "PickImage")))
         m.Add()
         m.Add("保存`tCtrl+S", NoteWindow.MB(ObjBindMethod(this, "Cmd", "save")))
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     /* ---- 图片菜单 ---------------------------------------------------------
@@ -1176,7 +1190,7 @@ class NoteWindow {
 
        ★ 剪贴板只能由宿主写：原生菜单一点，页面就没有用户手势了，
          navigator.clipboard 会被 Chromium 拒掉。见 lib\clip.ahk。 */
-    ShowImageMenu() {
+    ShowImageMenu(dry := 0) {
         path := NoteWindow.ImageLocalPath(this.menuImage)
         has := (path != "" && FileExist(path))
         /* ★ Disable 要传 Add 时的**完整名字**，带 `t 和加速键文本。
@@ -1201,7 +1215,7 @@ class NoteWindow {
                 m.Disable("在文件夹中显示")
             }
         }
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     CopyImage() {

@@ -43,7 +43,7 @@
   const rmDays = $('rmDays'), rmAt = $('rmAt');
   const rmMail = $('rmMail'), rmHook = $('rmHook'), rmHookUrl = $('rmHookUrl');
   const rmRun = $('rmRun'), rmExe = $('rmExe'), rmArgs = $('rmArgs'), rmWait = $('rmWait');
-  const rmExePre = $('rmExePre'), rmArgsPre = $('rmArgsPre'), rmWaitWrap = $('rmWaitWrap');
+  const rmRunBox = $('rmRunBox'), rmWaitWrap = $('rmWaitWrap'), rmWaitTip = $('rmWaitTip');
   const lightbox = $('lightbox'), lightboxImg = $('lightboxImg');
   const codeCopy = $('codeCopy'), codeCopyText = $('codeCopyText');
 
@@ -644,16 +644,16 @@
     syncChannelFields();
   }
 
-  /* 「通知」那一行的显隐全靠这里。输入框只在对应通道勾上时出现，
-     不然一整排空框会让人以为必须填。 */
+  /* 「通知」那一行和「运行程序」那个小框的显隐全靠这里。
+     输入框只在对应通道勾上时出现，不然一整排空框会让人以为必须填。
+     「等它跑完」只给运行程序用，所以它整块跟着 run 走 ——
+     放在「通知」那一行里，看着像对邮件 / Webhook 也生效。 */
   function syncChannelFields() {
     rmHookUrl.hidden = !rmHook.checked;
-    const run = rmRun.checked;
-    rmExePre.hidden = !run;
-    rmExe.hidden = !run;
-    rmArgsPre.hidden = !run;
-    rmArgs.hidden = !run;
-    rmWaitWrap.hidden = !run;
+    rmRunBox.hidden = !rmRun.checked;
+    rmWaitTip.textContent = rmWait.checked
+      ? '等它退出才算投递完成（最多 10 秒，超时会被结束）'
+      : '不勾就启动后立刻继续，不管它跑多久';
   }
 
   function closeRem() {
@@ -798,6 +798,7 @@
     syncChannelFields();
     if (rmRun.checked) rmExe.focus();
   });
+  rmWait.addEventListener('change', syncChannelFields);
   rmAdd.addEventListener('click', addRule);
   $('rmpClose').addEventListener('click', closeRem);
   rmp.addEventListener('keydown', e => {
@@ -1461,6 +1462,18 @@
       addRule();
       return 1;
     },
+    /* 「运行程序」那一组框显不显示。「等它跑完」只吃这一个程序，
+       不勾它时整组都不该出现 —— 这就是"别让人误以为它对三种通道都生效"那条。 */
+    runBox: () => (rmRunBox.hidden ? 0 : 1),
+    /* 「运行程序」那一组是不是单独占一块（在「通知」那一行下面、往右缩进）——
+       它在视觉上必须和邮件 / Webhook 分开，否则「等它跑完」看着像对三种通道
+       都生效。这条断言就是钉这个的。 */
+    runBoxBelow: () => {
+      const a = document.querySelector('.rmp-ch').getBoundingClientRect();
+      const b = rmRunBox.getBoundingClientRect();
+      return (b.top >= a.bottom - 1 && b.left >= a.left + 8) ? 1 : 0;
+    },
+    waitTip: () => rmWaitTip.textContent,
     /* 点第 i 张卡片右上角的 ↗。走真 DOM 点击，和用户按下去是同一条路 */
     clickLk: i => {
       const el = listEl.querySelectorAll('.ti')[i];

@@ -215,7 +215,7 @@ class ListWindow {
 
     /* 过滤菜单：五项，每项三态（不限 / 是 / 否）。用系统原生菜单而不是页面里的
        一排下拉框 —— 五个三态控件横着排不开，380px 宽的窗口里会被挤成一坨。 */
-    static ShowFilterMenu() {
+    static ShowFilterMenu(dry := 0) {
         if !ListWindow.Win
             return
         f := ListWindow.Filter
@@ -240,7 +240,7 @@ class ListWindow {
                 sub.Check(d.no)
             m.Add(d.title, sub)
         }
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     static SetFilter(key, val) {
@@ -276,9 +276,28 @@ class ListWindow {
         ListWindow.PushAll(ListWindow.Query)
     }
 
+    /* 批量导出能选哪些格式。单张菜单和批量菜单必须一致，所以只在这里写一份。
+       .qntodo 只在选中里**真的有**待办便签时才出现 —— 全是普通便签却给一个
+       "待办包"，点下去只会得到一句"没有待办便签"，属于骗人点一次。
+       返回的每项是 [标签, 格式]，空数组表示一条分隔线。 */
+    static BatchExportFormats(ids) {
+        list := [["纯文本  (*.txt)", "txt"], ["Markdown (*.md)", "md"]
+            , ["网页  (*.html)", "html"], ["RTF 文档 (*.rtf)", "rtf"], []
+            , ["PDF 文档  (*.pdf)", "pdf"], ["Word 文档 (*.docx)", "docx"]]
+        for id in ids {
+            n := ListWindow.Store ? ListWindow.Store.Get(id) : 0
+            if (n && n.kind = "todo") {
+                list.Push([])
+                list.Push(["待办包 (*.qntodo)", "qntodo"])
+                break
+            }
+        }
+        return list
+    }
+
     /* 批量操作里的三个"要选值"的动作（颜色 / 透明度 / 导出格式）。
        都只是把值点出来，真正干活的是 App.BatchNotes —— 它还要同步已开的窗口。 */
-    static ShowBatchMenu(kind, ids) {
+    static ShowBatchMenu(kind, ids, dry := 0) {
         if !ListWindow.Win || !ids.Length
             return
         m := Menu()
@@ -299,17 +318,16 @@ class ListWindow {
                     m.Add(pct "%", ListWindow.Cb(ListBatch("opacity", ids, pct)))
                 }
             case "export":
-                m.Add("纯文本  (*.txt)", ListWindow.Cb(ListBatch("export", ids, "txt")))
-                m.Add("Markdown (*.md)", ListWindow.Cb(ListBatch("export", ids, "md")))
-                m.Add("网页  (*.html)", ListWindow.Cb(ListBatch("export", ids, "html")))
-                m.Add("RTF 文档 (*.rtf)", ListWindow.Cb(ListBatch("export", ids, "rtf")))
-                m.Add()
-                m.Add("PDF 文档 (*.pdf)", ListWindow.Cb(ListBatch("export", ids, "pdf")))
-                m.Add("Word 文档 (*.docx)", ListWindow.Cb(ListBatch("export", ids, "docx")))
+                for p in ListWindow.BatchExportFormats(ids) {
+                    if !p.Length
+                        m.Add()
+                    else
+                        m.Add(p[1], ListWindow.Cb(ListBatch("export", ids, p[2])))
+                }
             default:
                 return
         }
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     /* 切换列表窗口的置顶。窗口不在也照样记下偏好（下次打开就是置顶的），
@@ -483,7 +501,7 @@ class ListWindow {
     /* 右键菜单。id=0 表示点在空白处（面板菜单），否则是该条便签的菜单。
        参数用普通函数包一层再交给 Cb：闭包捕获的是"变量"，直接在 for 循环里
        建箭头会导致所有项都指向最后一个颜色。 */
-    static ShowMenu(id) {
+    static ShowMenu(id, dry := 0) {
         if !ListWindow.Win
             return
         if (id) {
@@ -543,7 +561,7 @@ class ListWindow {
             m.Add()
             m.Add("收起这张", ListWindow.Cb(ListMenuHide(id)))
             m.Add("删除…", ListWindow.Cb(ListMenuDelete(id)))
-            m.Show()
+            NoteWindow.FinishMenu(m, dry)
             return
         }
         m := Menu()
@@ -561,7 +579,7 @@ class ListWindow {
         m.Add()
         m.Add("设置…", ListWindow.Cb(ListMenuSettings()))
         m.Add("打开数据目录", ListWindow.Cb(ListMenuDataDir()))
-        m.Show()
+        NoteWindow.FinishMenu(m, dry)
     }
 
     ; 页面就绪时先下发外观/交互参数，再推数据

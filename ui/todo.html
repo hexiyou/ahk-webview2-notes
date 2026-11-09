@@ -140,11 +140,23 @@
       <label class="rmp-chk"><input type="checkbox" id="rmHook"> Webhook</label>
       <label class="rmp-chk"><input type="checkbox" id="rmRun"> 运行程序</label>
       <input id="rmHookUrl" class="rmp-url" type="url" placeholder="https://example.com/hook" hidden spellcheck="false">
-      <span class="rmp-pre" id="rmExePre" hidden>程序</span>
-      <input id="rmExe" class="rmp-in" type="text" placeholder="C:\path\app.exe 或 cmd.exe" hidden spellcheck="false">
-      <span class="rmp-pre" id="rmArgsPre" hidden>参数</span>
-      <input id="rmArgs" class="rmp-in" type="text" placeholder="可用 {title} {status} {dueAt}" hidden spellcheck="false">
-      <label class="rmp-chk" id="rmWaitWrap" hidden><input type="checkbox" id="rmWait"> 等它跑完</label>
+    </div>
+    <!-- 「运行程序」自己的参数收在一个框里，只在勾上它时出现。
+         原来这几项和「邮件 / Webhook」挤在同一行，那个「等它跑完」看着像对
+         三种通知都生效 —— 它只管这一个程序，所以必须视觉上归到它名下。 -->
+    <div class="rmp-run" id="rmRunBox" hidden>
+      <div class="rmp-run-row">
+        <span class="rmp-pre">程序</span>
+        <input id="rmExe" class="rmp-in" type="text" placeholder="C:\path\app.exe（跑命令就填 cmd.exe）" spellcheck="false">
+      </div>
+      <div class="rmp-run-row">
+        <span class="rmp-pre">参数</span>
+        <input id="rmArgs" class="rmp-in" type="text" placeholder="可用 {title} {status} {dueAt}；跑命令填 /c …" spellcheck="false">
+      </div>
+      <div class="rmp-run-row">
+        <label class="rmp-chk" id="rmWaitWrap"><input type="checkbox" id="rmWait"> 等它跑完</label>
+        <span class="rmp-run-tip" id="rmWaitTip">否则启动后立刻继续</span>
+      </div>
     </div>
     <div class="rmp-foot">
       <span class="rmp-hint" id="rmpHint"></span>

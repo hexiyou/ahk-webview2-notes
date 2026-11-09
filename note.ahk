@@ -668,8 +668,86 @@ class App {
         switch fmt {
             case "pdf": Pdf.SaveMany(notes)
             case "docx": Word.SaveMany(notes)
+            case "qntodo": App.ExportTodoMany(notes)
             default: Export.SaveMany(notes, fmt)
         }
+    }
+
+    /* 批量导出待办包：一个包只装一张待办便签，所以"批量"= 选过的每张各出一个包。
+       和 Export.SaveMany 一样只选一次目录，不逐张弹"另存为"。
+
+       与单张导出的区别只有两点，都是为了别问十遍：
+       · 普通便签直接跳过（列表里两种类型混在一起，选中一批一定混着），
+         跳了几张在最后的提示里说清楚；
+       · "要不要带关联便签"只问一次，整批统一。 */
+    static ExportTodoMany(notes) {
+        split := App.SplitTodo(notes)
+        if !split.todos.Length {
+            App.Toast("选中的便签里没有待办便签")
+            return
+        }
+        todos := split.todos
+        nlink := 0
+        for n in todos {
+            for it in TodoStore.Items(n.id) {
+                if (it.link_note_id)
+                    nlink++
+            }
+        }
+        withLinks := 1
+        if (nlink > 0) {
+            r := MsgBox("选中的待办便签里共有 " nlink " 个事项关联了其它便签。`n`n"
+                . "要一起打包吗？不含的话，包到别的机器上关联会失效。"
+                , "批量导出待办包", "YesNo Icon? Default1")
+            withLinks := (r = "Yes") ? 1 : 0
+        }
+        dir := FileSelect("D", A_Desktop, "批量导出待办包 —— 选一个文件夹")
+        if (dir = "")
+            return
+        r := App.ExportTodoManyTo(todos, dir, withLinks)
+        msg := "已导出 " r.ok " 个待办包（共 " r.items " 个事项）"
+        if (split.skipped)
+            msg .= "，跳过 " split.skipped " 张非待办便签"
+        if (r.missing)
+            msg .= "，" r.missing " 张图的源文件不在了"
+        if (r.fail)
+            msg .= "，" r.fail " 张失败"
+        App.Toast(msg "（" RTrim(dir, "\") "）")
+    }
+
+    /* 把一批便签分成"待办"和"其它"。抽出来是为了自检能直接算 ——
+       列表里两种类型混着选是常态，跳过几张必须在提示里说清楚。 */
+    static SplitTodo(notes) {
+        todos := [], skipped := 0
+        for n in notes {
+            if (n && n.kind = "todo")
+                todos.Push(n)
+            else
+                skipped += 1
+        }
+        return {todos: todos, skipped: skipped}
+    }
+
+    /* 真干活的那一半：不弹任何对话框，目录由调用方给。
+       分开是为了能自检 —— 弹文件对话框的函数没法在自检里跑。 */
+    static ExportTodoManyTo(todos, dir, withLinks) {
+        dir := RTrim(dir, "\")
+        used := Map()        ; 本批已用掉的文件名，同名往后排（见 Export.UniquePath）
+        ok := 0, fail := 0, nItems := 0, nMiss := 0, files := []
+        for n in todos {
+            path := Export.UniquePath(dir, Export.FileStem(n), "qntodo", used)
+            res := TodoExport.Save(n.id, path, Map("links", withLinks))
+            if res.ok {
+                ok += 1
+                nItems += res.items
+                nMiss += res.missing
+                files.Push(path)
+            } else {
+                fail += 1
+                App.Log("批量导出待办包失败：id=" n.id " / " res.msg)
+            }
+        }
+        return {ok: ok, fail: fail, items: nItems, missing: nMiss, files: files}
     }
 
     /* ---- 待办包（.qntodo）-------------------------------------------------
@@ -1826,17 +1904,177 @@ SelfTestShowAll() {
     SelfTestDone()
 }
 
-/* 自检：把第一张便签的菜单弹出来（会阻塞到菜单关闭）。
-   只用来确认"从 WebView2 消息回调退出来之后仍能正常弹原生菜单"，
-   日志里没有"未处理异常"就算过。 */
+/* 自检：把每一套菜单**建一遍**，但不弹（dry=1）。
+   ★ 为什么要有这条：菜单是运行时在宿主线程里现搭的，任何一处写错都表现为
+     "点标题栏 / 点 ⋯ / 点右键，毫无反应" —— 异常被 NoteOnError 静默记进日志，
+     界面上什么都不发生。而 `--check` 对这种错**一条警告都不给**（它是运行时
+     异常，不是语法错误），只有真去建一次才暴露。
+     触发它的两次事故：块注释和函数定义粘成一行、两条语句粘成一行（见 README）。 */
 SelfTestMenu() {
-    for id, w in NoteWindow.All {
-        App.Log("SELFTEST 准备弹菜单（便签 " id "）")
-        w.ShowMenu()
-        App.Log("SELFTEST 菜单已关闭，没有抛异常")
-        break
+    try SelfTestMenuRun()
+    catch as e {
+        App.Log("SELFTEST MENU 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST MENU 结论：未通过（异常中断）")
     }
     SelfTestDone()
+}
+
+SelfTestMenuRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+
+    /* 0. 错误处理器自己得活着。上一次「注释粘到函数定义上」就是它先崩，
+       原始异常反而看不见了 —— 这条顺手钉住它。 */
+    RichSay("CleanComError 可用", CleanComError("boom") = "boom", CleanComError("boom"))
+
+    /* 1. 一张普通便签：note / edit / image 三套菜单。
+       image 故意给空 src —— 走的是"图文件找不到了"那条分支，
+       顺带把 m.Disable 那几句也跑到。 */
+    w := App.NewNote(Map("activate", 0, "text", "菜单自检"))
+    if !w {
+        App.Log("SELFTEST MENU 建不出普通便签")
+        App.Log("SELFTEST MENU 结论：未通过（没窗口）")
+        return
+    }
+    Loop 60 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("普通便签页面就绪", w.ready = 1, w.ready)
+
+    w.menuZone := "note"
+    ok := 1
+    try w.ShowMenu(1)
+    catch as e {
+        ok := 0
+        App.Log("SELFTEST MENU 便签菜单抛异常：" CleanComError(e.Message) " @" e.Line)
+    }
+    RichSay("标题栏 / ⋯ 的便签菜单建得出来", ok, ok ? "" : "见上一条")
+
+    w.menuZone := "edit", w.menuInPre := 1, w.menuLang := "ahk"
+    ok := 1
+    try w.ShowMenu(1)
+    catch as e {
+        ok := 0
+        App.Log("SELFTEST MENU 编辑菜单抛异常：" CleanComError(e.Message) " @" e.Line)
+    }
+    RichSay("正文右键的编辑菜单建得出来（含代码块分支）", ok, ok ? "" : "见上一条")
+
+    w.menuZone := "image", w.menuImage := ""
+    ok := 1
+    try w.ShowMenu(1)
+    catch as e {
+        ok := 0
+        App.Log("SELFTEST MENU 图片菜单抛异常：" CleanComError(e.Message) " @" e.Line)
+    }
+    RichSay("图片菜单建得出来（图不在了也要能建）", ok, ok ? "" : "见上一条")
+
+    /* 2. 一张待办便签：待办菜单 + 事项菜单的三种入口 */
+    wt := App.NewTodoNote(Map("activate", 0))
+    if !wt {
+        App.Log("SELFTEST MENU 建不出待办便签")
+        App.Log("SELFTEST MENU 结论：未通过（没待办窗口）")
+        return
+    }
+    Loop 60 {
+        if wt.ready
+            break
+        Sleep 100
+    }
+    Loop 30 {
+        if (TodoStore.Count(wt.id) >= 1)
+            break
+        Sleep 100
+    }
+    RichSay("待办便签页面就绪", wt.ready = 1 && TodoStore.Count(wt.id) >= 1
+        , wt.ready " / 事项 " TodoStore.Count(wt.id))
+
+    wt.menuZone := "note"
+    ok := 1
+    try wt.ShowMenu(1)
+    catch as e {
+        ok := 0
+        App.Log("SELFTEST MENU 待办菜单抛异常：" CleanComError(e.Message) " @" e.Line)
+    }
+    RichSay("待办便签标题栏 / ⋯ 菜单建得出来", ok, ok ? "" : "见上一条")
+
+    it := TodoStore.Items(wt.id)
+    if it.Length {
+        itemID := it[1].id
+        for kind in ["item", "status", "link"] {
+            wt.menuZone := "todo", wt.menuKind := kind, wt.menuItem := itemID
+            wt.menuInPre := (kind = "item") ? 1 : 0, wt.menuLang := "js"
+            ok := 1
+            try wt.ShowMenu(1)
+            catch as e {
+                ok := 0
+                App.Log("SELFTEST MENU 事项菜单(" kind ")抛异常：" CleanComError(e.Message) " @" e.Line)
+            }
+            RichSay("事项菜单建得出来（kind=" kind "）", ok, ok ? "" : "见上一条")
+        }
+    } else {
+        RichSay("事项菜单建得出来（kind=item）", 0, "没有事项可测")
+    }
+
+    /* 3. 列表窗口：面板菜单、单条菜单、批量菜单 */
+    App.ShowList()
+    Loop 50 {
+        if ListWindow.IsOpen()
+            break
+        Sleep 100
+    }
+    Sleep 400
+    ok := 1
+    try ListWindow.ShowMenu(0, 1)
+    catch as e {
+        ok := 0
+        App.Log("SELFTEST MENU 列表面板菜单抛异常：" CleanComError(e.Message) " @" e.Line)
+    }
+    RichSay("列表空白处菜单建得出来", ok, ok ? "" : "见上一条")
+
+    for id in [w.id, wt.id] {
+        ok := 1
+        try ListWindow.ShowMenu(id, 1)
+        catch as e {
+            ok := 0
+            App.Log("SELFTEST MENU 列表条目菜单抛异常（id=" id "）：" CleanComError(e.Message) " @" e.Line)
+        }
+        RichSay("列表条目菜单建得出来（" ListWindow.Store.Get(id).kind "）", ok, ok ? "" : "见上一条")
+    }
+
+    for kind in ["color", "opacity", "export"] {
+        ok := 1
+        try ListWindow.ShowBatchMenu(kind, [w.id, wt.id], 1)
+        catch as e {
+            ok := 0
+            App.Log("SELFTEST MENU 批量菜单(" kind ")抛异常：" CleanComError(e.Message) " @" e.Line)
+        }
+        RichSay("批量菜单建得出来（" kind "）", ok, ok ? "" : "见上一条")
+    }
+
+    /* 4. 批量导出的格式表：.qntodo 只在选中里真有待办时出现。
+       这是"列表的批量导出菜单没有待办包"那个缺口的钉子。 */
+    hasTodo := 0, hasPlain := 0
+    for p in ListWindow.BatchExportFormats([w.id, wt.id])
+        if (p.Length = 2 && p[2] = "qntodo")
+            hasTodo := 1
+    for p in ListWindow.BatchExportFormats([w.id])
+        if (p.Length = 2 && p[2] = "qntodo")
+            hasPlain := 1
+    RichSay("批量导出：选中里有待办 → 出现待办包", hasTodo = 1, hasTodo)
+    RichSay("批量导出：全是普通便签 → 没有待办包", hasPlain = 0, hasPlain)
+
+    /* 收尾：自检造出来的两张便签删掉，共享目录里不留垃圾。
+       先关列表，免得删除后列表页对着已删的行回推。 */
+    try ListWindow.Close()
+    Sleep 300
+    App.DeleteNote(wt.id)
+    App.DeleteNote(w.id)
+    Sleep 200
+    RichSay("收尾：自检便签已删除"
+        , !App.Store.Get(w.id) && !App.Store.Get(wt.id), w.id " / " wt.id)
+
+    App.Log("SELFTEST MENU 结论：" (RICH_FAIL = 0 ? "通过" : "未通过") "（" RICH_PASS " 项）")
 }
 
 /* 自检：列表窗口的 Ctrl+N 链路。
@@ -4992,6 +5230,31 @@ SelfTestTodoIORun() {
     bad4 := TodoExport.Save(linkID, packPath)
     RichSay("普通便签不能导出成 .qntodo", bad4.ok = 0, bad4.msg)
 
+    ; ---- 8b. 批量导出（列表批量菜单走的就是这条）------------------------
+    /* 一个包只装一张便签，所以"批量"= 每张各出一个。这里盯三件事：
+       混选时普通便签被跳过、同名不互相覆盖、事项总数对得上。 */
+    bdir := App.DataDir "\_todoio-batch"
+    try DirCreate bdir
+    Loop Files, bdir "\*.qntodo"
+        try FileDelete A_LoopFileFullPath
+    /* 两张同名待办：标题一样，包名必须自己让开（批量甲.qntodo / 批量甲 (2).qntodo） */
+    bt1 := App.Store.Create(Map("kind", "todo", "title", "批量甲", "color", "yellow"))
+    bt2 := App.Store.Create(Map("kind", "todo", "title", "批量甲", "color", "green"))
+    TodoStore.Add(bt1, Map("title", "甲一"))
+    TodoStore.Add(bt2, Map("title", "乙一", "status", "doing"))
+    bsx := App.SplitTodo([App.Store.Get(bt1), App.Store.Get(linkID), App.Store.Get(bt2)])
+    RichSay("批量导出：混选时普通便签被挑出去"
+        , bsx.todos.Length = 2 && bsx.skipped = 1
+        , bsx.todos.Length " / 跳过 " bsx.skipped)
+    br := App.ExportTodoManyTo(bsx.todos, bdir, 1)
+    RichSay("批量导出：两张待办各出一个包", br.ok = 2 && br.files.Length = 2, br.ok)
+    RichSay("批量导出：同名自动加序号，不互相覆盖"
+        , FileExist(bdir "\批量甲.qntodo") && FileExist(bdir "\批量甲 (2).qntodo"))
+    RichSay("批量导出：事项数合计对得上", br.items = 2, br.items)
+    bp := TodoExport.Peek(bdir "\批量甲 (2).qntodo")
+    RichSay("批量导出的第二个包是另一张便签", bp.ok = 1 && bp.items = 1
+        , bp.ok ? bp.title " / " bp.items : bp.msg)
+
     ; ---- 9. 收尾 ----------------------------------------------------------
     /* 先删导入时新建的关联便签，再删两张待办便签，最后删文件。
        留着会在共享数据目录里堆垃圾，下一轮自检的窗口数就对不上了。 */
@@ -5002,6 +5265,11 @@ SelfTestTodoIORun() {
     try App.Store.Delete(dstID)
     try App.Store.Delete(srcID)
     try App.Store.Delete(linkID)
+    try App.Store.Delete(bt1)
+    try App.Store.Delete(bt2)
+    Loop Files, bdir "\*.qntodo"
+        try FileDelete A_LoopFileFullPath
+    try DirDelete bdir
     try FileDelete packPath
     try FileDelete badPath
     try FileDelete imgPath
@@ -5214,6 +5482,27 @@ SelfTestRemindRun() {
     RichSay("面板这一行标出了通道"
         , InStr(JStr(RichEval(w, "__todo.remText(1)")), "程序") > 0
         , JStr(RichEval(w, "__todo.remText(1)")))
+    /* 「等它跑完」只吃「运行程序」这一个通道。只勾邮件 / Webhook 时那一组框
+       必须整块不出现在页面上 —— 混在「通知」那一行里，人会以为三种通道都在等。 */
+    RichEval(w, "__todo.remChNoSubmit({mail:1})")
+    RichSay("只勾邮件 → 「运行程序」那一组不显示"
+        , JStr(RichEval(w, "__todo.runBox()")) = "0"
+        , JStr(RichEval(w, "__todo.runBox()")))
+    RichEval(w, "__todo.remChNoSubmit({run:1, exe:'C:\\Windows\\notepad.exe', wait:0})")
+    RichSay("勾上运行程序 → 那一组才出现"
+        , JStr(RichEval(w, "__todo.runBox()")) = "1"
+        , JStr(RichEval(w, "__todo.runBox()")))
+    RichSay("那一组另起一块（在「通知」行下面、缩进）"
+        , JStr(RichEval(w, "__todo.runBoxBelow()")) = "1"
+        , JStr(RichEval(w, "__todo.runBoxBelow()")))
+    RichSay("不勾「等它跑完」时说明是启动后立刻继续"
+        , InStr(JStr(RichEval(w, "__todo.waitTip()")), "立刻继续") > 0
+        , JStr(RichEval(w, "__todo.waitTip()")))
+    RichEval(w, "__todo.remChNoSubmit({run:1, exe:'C:\\Windows\\notepad.exe', wait:1})")
+    RichSay("勾上后提示改成等它退出"
+        , InStr(JStr(RichEval(w, "__todo.waitTip()")), "退出") > 0
+        , JStr(RichEval(w, "__todo.waitTip()")))
+
     /* 勾了程序却不填路径：页面当场拦下来，不落库、不静默存一条废规则 */
     n0 := Reminder.ForTodo(it.id).Length
     RichEval(w, "__todo.remChNoSubmit({run:1})")

@@ -52,6 +52,7 @@ for t in "$@"; do
     hotkey)    run_one hotkey    hotkey    "--selftest-hotkey" ;;
     opacity)   run_one opacity   opacity   "--selftest-opacity" ;;
     showall)   run_one showall   showall   "--selftest-showall" ;;
+    menu)      run_one menu      menu      "--selftest-menu" ;;
     settings)  run_one settings  settings  "--selftest-settings" ;;
     pdf)       run_one pdf       pdf       "--selftest-pdf" ;;
     docx)      run_one docx      docx      "--selftest-docx" ;;
