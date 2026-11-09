@@ -58,6 +58,7 @@ for t in "$@"; do
     todo)      run_one todo      todo      "--selftest-todo" ;;
     remind)    run_one remind    remind    "--selftest-remind" ;;
     notify)    run_one notify    notify    "--selftest-notify" ;;
+    todoio)    run_one todoio    todoio    "--selftest-todoio" ;;
     *) echo "未知标签：$t" ;;
   esac
 done

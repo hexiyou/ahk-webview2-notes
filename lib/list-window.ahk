@@ -534,6 +534,10 @@ class ListWindow {
             em.Add()
             em.Add("PDF 文档 (*.pdf)", ListWindow.Cb(ListMenuExport(id, "pdf")))
             em.Add("Word 文档 (*.docx)", ListWindow.Cb(ListMenuExport(id, "docx")))
+            /* 只有待办便签才有待办包。普通便签也该有条件判断 ——
+               列表里两种类型混在一起，不能按单张便签的菜单假设类型。 */
+            if (n.kind = "todo")
+                em.Add("待办包 (*.qntodo)", ListWindow.Cb(ListMenuExport(id, "qntodo")))
             m.Add("导出", em)
 
             m.Add()
@@ -545,6 +549,7 @@ class ListWindow {
         m := Menu()
         m.Add("新建便签", ListWindow.Cb(ListMenuNew()))
         m.Add("新建待办便签", ListWindow.Cb(ListMenuNewTodo()))
+        m.Add("导入待办包…", ListWindow.Cb(ListMenuImportTodo()))
         m.Add("刷新列表", ListWindow.Cb(ListMenuRefresh()))
         m.Add()
         m.Add("全部显示", ListWindow.Cb(ListMenuShowAll()))
@@ -681,6 +686,12 @@ ListMenuOpen(id) {
 
 ListMenuNewTodo() {
     return () => ListWindow.Call("onNewTodo")
+}
+
+/* 换机器的主入口：选一个 .qntodo，宿主建一张待办便签再导进去。
+   校验与建窗的顺序在 App.ImportTodoPackNew 里（先验包，再建窗）。 */
+ListMenuImportTodo() {
+    return () => ListWindow.Call("onImportTodo")
 }
 
 ListMenuExport(id, fmt) {

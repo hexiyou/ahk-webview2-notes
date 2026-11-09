@@ -132,12 +132,19 @@
       <button id="rmAdd" class="primary" type="button">加一条</button>
     </div>
     <!-- 通知方式。都不勾 = 托盘提示（默认，不打扰）。
-         邮件走设置页里的 SMTP 配置；Webhook 只发 JSON POST。 -->
+         邮件走设置页里的 SMTP 配置；Webhook 只发 JSON POST；
+         运行程序可以把事项内容当参数喂给外部脚本。 -->
     <div class="rmp-ch">
       <span class="rmp-pre">通知</span>
       <label class="rmp-chk"><input type="checkbox" id="rmMail"> 邮件</label>
       <label class="rmp-chk"><input type="checkbox" id="rmHook"> Webhook</label>
+      <label class="rmp-chk"><input type="checkbox" id="rmRun"> 运行程序</label>
       <input id="rmHookUrl" class="rmp-url" type="url" placeholder="https://example.com/hook" hidden spellcheck="false">
+      <span class="rmp-pre" id="rmExePre" hidden>程序</span>
+      <input id="rmExe" class="rmp-in" type="text" placeholder="C:\path\app.exe 或 cmd.exe" hidden spellcheck="false">
+      <span class="rmp-pre" id="rmArgsPre" hidden>参数</span>
+      <input id="rmArgs" class="rmp-in" type="text" placeholder="可用 {title} {status} {dueAt}" hidden spellcheck="false">
+      <label class="rmp-chk" id="rmWaitWrap" hidden><input type="checkbox" id="rmWait"> 等它跑完</label>
     </div>
     <div class="rmp-foot">
       <span class="rmp-hint" id="rmpHint"></span>

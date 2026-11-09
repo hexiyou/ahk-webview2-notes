@@ -216,6 +216,167 @@ JsonObj(text, key) {
     return ""
 }
 
+/* ---- 结构固定的自有格式用：数组 / 键 ---------------------------------- */
+
+/* 取 key 对应值的原文。open 是值的首字符：'{' 对象、'[' 数组、'"' 字符串。
+   找不到或类型不符返回空串。
+   为什么不写一个通用 JSON 解析器：.qntodo 是我们自己产出的格式，字段固定，
+   取值式解析够用，而且不需要为一棵树分配一整个对象图（几 MB 的 base64
+   会变成几百万个 Map，光是分配就能把内存吃掉）。 */
+JsonRaw(text, key, open) {
+    _ndl := '"' key '"'
+    _kl := StrLen(_ndl)
+    _n := StrLen(text)
+    _at := 0
+    while true {
+        _at := InStr(text, _ndl, 1, _at + 1)
+        if !_at
+            break
+        _i := _at + _kl
+        while (_i <= _n && InStr(" `t`r`n", SubStr(text, _i, 1)))
+            _i++
+        if (SubStr(text, _i, 1) != ":")
+            continue
+        _i++
+        while (_i <= _n && InStr(" `t`r`n", SubStr(text, _i, 1)))
+            _i++
+        if (SubStr(text, _i, 1) != open)
+            continue
+        if (open = '"') {
+            _e := _i + 1
+            while (_e <= _n) {
+                _x := SubStr(text, _e, 1)
+                if (_x = "\") {
+                    _e += 2
+                    continue
+                }
+                if (_x = '"')
+                    return SubStr(text, _i, _e - _i + 1)
+                _e++
+            }
+            return ""
+        }
+        _close := (open = "{") ? "}" : "]"
+        _depth := 0
+        _q := false
+        _e := _i
+        while (_e <= _n) {
+            _x := SubStr(text, _e, 1)
+            if _q {
+                if (_x = "\") {
+                    _e += 2
+                    continue
+                }
+                if (_x = '"')
+                    _q := false
+            } else if (_x = '"') {
+                _q := true
+            } else if (_x = open) {
+                _depth++
+            } else if (_x = _close) {
+                _depth--
+                if (_depth = 0)
+                    return SubStr(text, _i, _e - _i + 1)
+            }
+            _e++
+        }
+        return ""
+    }
+    return ""
+}
+
+/* [a,b,{…},"x,y"] → 每个元素的原文。只有顶层逗号算分隔符：字符串里的逗号、
+   嵌套对象/数组里的逗号都不算。 */
+JsonItems(arrText) {
+    out := []
+    _n := StrLen(arrText)
+    _i := 1
+    while (_i <= _n && SubStr(arrText, _i, 1) != "[")
+        _i++
+    if (_i > _n)
+        return out
+    _i++
+    _start := 0
+    _depth := 0
+    _q := false
+    while (_i <= _n) {
+        _c := SubStr(arrText, _i, 1)
+        if _q {
+            if (_c = "\") {
+                _i += 2
+                continue
+            }
+            if (_c = '"')
+                _q := false
+        } else if (_c = '"') {
+            _q := true
+        } else if (_c = "{" || _c = "[") {
+            _depth++
+        } else if (_c = "}" || _c = "]") {
+            if (_depth = 0) {          ; 只能是数组自己的收尾 ]
+                if (_start)
+                    out.Push(SubStr(arrText, _start, _i - _start))
+                break
+            }
+            _depth--
+        } else if (_c = "," && _depth = 0) {
+            if (_start)
+                out.Push(SubStr(arrText, _start, _i - _start))
+            _start := 0
+            _i++
+            continue
+        }
+        if (_start = 0 && !InStr(" `t`r`n,", _c))
+            _start := _i
+        _i++
+    }
+    return out
+}
+
+/* 对象顶层的所有键，按出现顺序。用来遍历 images 这种"名字事先不知道"的映射。 */
+JsonKeys(rawObj) {
+    out := []
+    _n := StrLen(rawObj)
+    _i := 1
+    while (_i <= _n && SubStr(rawObj, _i, 1) != "{")
+        _i++
+    if (_i > _n)
+        return out
+    _i++                              ; 跳过开头的 {，之后 depth=0 就是顶层
+    _depth := 0
+    _q := false
+    _start := 0
+    while (_i <= _n) {
+        _c := SubStr(rawObj, _i, 1)
+        if _q {
+            if (_c = "\") {
+                _i += 2
+                continue
+            }
+            if (_c = '"') {
+                _q := false
+                if (_depth = 0 && _start) {
+                    _j := _i + 1
+                    while (_j <= _n && InStr(" `t`r`n", SubStr(rawObj, _j, 1)))
+                        _j++
+                    if (SubStr(rawObj, _j, 1) = ":")
+                        out.Push(JsonUnescape(SubStr(rawObj, _start + 1, _i - _start - 1)))
+                }
+                _start := 0
+            }
+        } else if (_c = '"') {
+            _q := true
+            _start := _i
+        } else if (_c = "{" || _c = "[") {
+            _depth++
+        } else if (_c = "}" || _c = "]") {
+            _depth--
+        }
+        _i++
+    }
+    return out
+}
+
 /* COM 异常的 Message 后面会挂 "Source: ... Description: ..."，只留前半句人话 */
 CleanComError(msg) {
     p := InStr(msg, 'Source:')

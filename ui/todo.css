@@ -408,6 +408,9 @@
 .rm-text .rm-when { color: var(--fg-dim); }
 .rm-text .rm-when.over { color: #c0392b; }
 .rm-text .rm-stop { color: #a0522d; }
+/* 通道标记用叠色，和「下次 …」「已过 …」区分开：前者是"发到哪"，
+   后者是"什么时候"。 */
+.rm-text .rm-ch { color: #2c6fbb; }
 .rm.off .rm-text { color: var(--fg-dim); text-decoration: line-through; }
 .rm-del {
   flex: 0 0 auto;
@@ -493,3 +496,20 @@
 }
 
 .rmp-url[hidden] { display: none; }
+
+/* 「程序」「参数」两栏：和 .rmp-url 一样的外框，但不占满整行，
+   这样前面的「程序 / 参数」前缀才排得进去。 */
+.rmp-in {
+  flex: 1 1 55%;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid rgba(0, 0, 0, .16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .8);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  font-family: var(--mono, Consolas, monospace);
+}
+
+.rmp-in[hidden] { display: none; }

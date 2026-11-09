@@ -42,6 +42,8 @@
   const rmAnchor = $('rmAnchor'), rmNum = $('rmNum'), rmUnit = $('rmUnit');
   const rmDays = $('rmDays'), rmAt = $('rmAt');
   const rmMail = $('rmMail'), rmHook = $('rmHook'), rmHookUrl = $('rmHookUrl');
+  const rmRun = $('rmRun'), rmExe = $('rmExe'), rmArgs = $('rmArgs'), rmWait = $('rmWait');
+  const rmExePre = $('rmExePre'), rmArgsPre = $('rmArgsPre'), rmWaitWrap = $('rmWaitWrap');
   const lightbox = $('lightbox'), lightboxImg = $('lightboxImg');
   const codeCopy = $('codeCopy'), codeCopyText = $('codeCopyText');
 
@@ -620,6 +622,10 @@
     state.remId = id;
     rmpName.textContent = '· ' + (c.item.title || '（无标题）');
     setRemHint('');
+    /* 通知开关每次开面板都清空。否则给 A 事项勾了"邮件+Webhook"，
+       点开 B 事项时勾还在，随手加一条规则就把 B 也发出去了 ——
+       这种"我没配过却发了"的事故最难查。 */
+    resetChannels();
     rmp.hidden = false;
     /* 先清空再要数据：否则会有一瞬间显示上一条事项的规则，看着像串了 */
     rmpList.innerHTML = '';
@@ -627,10 +633,48 @@
     send({ type: 'rem-get', id: id });
   }
 
+  function resetChannels() {
+    rmMail.checked = false;
+    rmHook.checked = false;
+    rmRun.checked = false;
+    rmWait.checked = false;
+    rmHookUrl.value = '';
+    rmExe.value = '';
+    rmArgs.value = '';
+    syncChannelFields();
+  }
+
+  /* 「通知」那一行的显隐全靠这里。输入框只在对应通道勾上时出现，
+     不然一整排空框会让人以为必须填。 */
+  function syncChannelFields() {
+    rmHookUrl.hidden = !rmHook.checked;
+    const run = rmRun.checked;
+    rmExePre.hidden = !run;
+    rmExe.hidden = !run;
+    rmArgsPre.hidden = !run;
+    rmArgs.hidden = !run;
+    rmWaitWrap.hidden = !run;
+  }
+
   function closeRem() {
     rmp.hidden = true;
     state.remId = 0;
     state.rules = [];
+  }
+
+  /* notify 是宿主存的原始 JSON（如 {"run":{"on":1,...}}）。空串 = 没配通道，
+     到点走托盘提示。解析失败就当没配 —— 这种情况只可能来自手改了库，
+     不值得为它弹错误。 */
+  function channelTags(notifyTxt) {
+    if (!notifyTxt) return [];
+    let o;
+    try { o = JSON.parse(notifyTxt); } catch (e) { return []; }
+    if (!o || typeof o !== 'object') return [];
+    const tags = [];
+    if (o.run && o.run.on) tags.push('程序');
+    if (o.webhook && o.webhook.on) tags.push('Webhook');
+    if (o.smtp && o.smtp.on) tags.push('邮件');
+    return tags;
   }
 
   function renderRules(id, rules) {
@@ -666,6 +710,15 @@
         w.textContent = ' · ' + (over ? '已过 ' : '下次 ') + r.next_text;
         txt.appendChild(w);
       }
+      /* 通道标记：不加这一行，勾完就再也看不到这条规则会发到哪 ——
+         只能靠回忆，而回忆在三天后基本等于没有。 */
+      const tags = channelTags(r.notify);
+      if (tags.length) {
+        const t = document.createElement('span');
+        t.className = 'rm-ch';
+        t.textContent = ' · ' + tags.join('/');
+        txt.appendChild(t);
+      }
 
       const del = document.createElement('button');
       del.type = 'button';
@@ -685,34 +738,65 @@
     rmDayWrap.hidden = !daily;
   }
 
+  /* 三个开关 → 一次 rem-add 的通道字段。「提前」和「每天」两条分支只是
+     时间参数不同，通道完全一样，所以抽出来，免得以后再加通道要改两处。 */
+  function channelFields() {
+    return {
+      mail: rmMail.checked ? 1 : 0,
+      hook: rmHook.checked ? 1 : 0,
+      hook_url: rmHookUrl.value.trim(),
+      run: rmRun.checked ? 1 : 0,
+      exe: rmExe.value.trim(),
+      args: rmArgs.value.trim(),
+      wait: rmWait.checked ? 1 : 0
+    };
+  }
+
+  /* 勾了却没填 = 这条规则永远发不出去。在"加一条"这一刻就说清楚，
+     而不是等三天后发现"到点了什么都没发生"。 */
+  function channelsOk() {
+    if (rmHook.checked && !rmHookUrl.value.trim()) {
+      setRemHint('勾了 Webhook 但没填地址', true);
+      rmHookUrl.focus();
+      return false;
+    }
+    if (rmRun.checked && !rmExe.value.trim()) {
+      setRemHint('勾了「运行程序」但没填程序路径', true);
+      rmExe.focus();
+      return false;
+    }
+    return true;
+  }
+
   function addRule() {
     if (!state.remId) return;
+    if (!channelsOk()) return;
+    const ch = channelFields();
     if (rmKind.value === 'daily') {
       const days = Math.max(0, Math.min(60, Number(rmDays.value) || 0));
       send({
         type: 'rem-add', id: state.remId, kind: 'daily',
-        days: days, at_time: rmAt.value || '09:00',
-        mail: rmMail.checked ? 1 : 0,
-        hook: rmHook.checked ? 1 : 0,
-        hook_url: rmHookUrl.value.trim()
+        days: days, at_time: rmAt.value || '09:00', ...ch
       });
     } else {
       const unit = Number(rmUnit.value) || 1;
       const num = Math.max(0, Number(rmNum.value) || 0);
       send({
         type: 'rem-add', id: state.remId, kind: 'offset',
-        anchor: rmAnchor.value, offset: Math.min(43200, num * unit),
-        mail: rmMail.checked ? 1 : 0,
-        hook: rmHook.checked ? 1 : 0,
-        hook_url: rmHookUrl.value.trim()
+        anchor: rmAnchor.value, offset: Math.min(43200, num * unit), ...ch
       });
     }
+    setRemHint('');
   }
 
   rmKind.addEventListener('change', remKindChanged);
   rmHook.addEventListener('change', () => {
-    rmHookUrl.hidden = !rmHook.checked;
+    syncChannelFields();
     if (rmHook.checked) rmHookUrl.focus();
+  });
+  rmRun.addEventListener('change', () => {
+    syncChannelFields();
+    if (rmRun.checked) rmExe.focus();
   });
   rmAdd.addEventListener('click', addRule);
   $('rmpClose').addEventListener('click', closeRem);
@@ -1345,6 +1429,38 @@
       return 1;
     },
     remHint: () => rmpHint.textContent,
+    /* 通道开关 → 点「加一条」。走的是和用户完全相同的路（勾框 + addRule），
+       这样测的是"页面怎么拼 notify"，而不是绕过页面直接调宿主。 */
+    remCh: o => {
+      if (!state.remId) return 0;
+      rmMail.checked = !!o.mail;
+      rmHook.checked = !!o.hook;
+      rmHookUrl.value = o.hookUrl || '';
+      rmRun.checked = !!o.run;
+      rmExe.value = o.exe || '';
+      rmArgs.value = o.args || '';
+      rmWait.checked = !!o.wait;
+      syncChannelFields();
+      addRule();
+      return 1;
+    },
+    /* 只勾不提交：用来验"勾了却没填"会被当场拦下来 */
+    remChNoSubmit: o => {
+      rmMail.checked = !!o.mail;
+      rmHook.checked = !!o.hook;
+      rmHookUrl.value = o.hookUrl || '';
+      rmRun.checked = !!o.run;
+      rmExe.value = o.exe || '';
+      rmArgs.value = o.args || '';
+      rmWait.checked = !!o.wait;
+      syncChannelFields();
+      return 1;
+    },
+    remSubmit: () => {
+      if (!state.remId) return 0;
+      addRule();
+      return 1;
+    },
     /* 点第 i 张卡片右上角的 ↗。走真 DOM 点击，和用户按下去是同一条路 */
     clickLk: i => {
       const el = listEl.querySelectorAll('.ti')[i];

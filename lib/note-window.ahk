@@ -512,6 +512,9 @@ class NoteWindow {
             out .= ',"text":' JsonQuote(r.text)
             out .= ',"next_text":' JsonQuote(r.next_text)
             out .= ',"stop":' JsonQuote(r.stop)
+            /* 通道配置原文也推给页面：规则列表要能显示"这条走邮件/程序"，
+               否则勾完就看不见了，只能靠记性。 */
+            out .= ',"notify":' JsonQuote(r.notify)
             out .= "}"
         }
         return out "]"
@@ -522,16 +525,27 @@ class NoteWindow {
             . ',"rules":' NoteWindow.RulesJson(todoID) "}")
     }
 
-    /* 通道：页面给两个开关（mail / hook）+ 一个 URL。
-       都不勾 → notify 是空串 → 投递时走托盘提示，和 P2 的老规则一致。
+    /* 页面「通知」那一行的三个开关 → notify JSON。
+       都留空就是托盘提示（P2 的老行为），不写 notify 字段。
        在规则级配而不是全局配，是因为"这条要发邮件、那条只要托盘"
-       才是真实需求。
-       抽成静态函数是为了能单独测：写进库里的这串 JSON 必须能被
-       Notify.Channels() 解析回来，光看代码不算数。 */
-    static BuildNotify(mail, hookOn, hookUrl) {
+       才是真实需求。抽成静态纯函数是为了能单测：写进库里的这串 JSON
+       必须能被 Notify.Channels() 解析回来，光看代码不算数。
+
+       参数为什么这么多：三种通道各自的必填项不一样，而这条规则一旦存错
+       就只能在"到点了却什么都没发生"里发现。宁可签名难看，也要在**加规则
+       的这一刻**把"勾了却没填"的情况判掉。 */
+    static BuildNotify(mail, hookOn, hookUrl, runOn := 0, exe := "", args := "", wait := 0) {
         ntf := ""
+        /* 程序：填的是完整路径或可执行名。勾了却没填 = 没配，和 Webhook
+           一个道理 —— 存一条永远发不出去的规则比不存更糟。 */
+        prog := Trim(exe)
+        if (runOn && prog != "") {
+            ntf .= (ntf = "" ? "" : ",") '"run":{"on":1,"exe":' JsonQuote(prog)
+                . ',"args":' JsonQuote(Trim(args))
+                . ',"wait":' (wait ? 1 : 0) '}'
+        }
         if mail
-            ntf .= '"smtp":{"on":1,"to":""}'
+            ntf .= (ntf = "" ? "" : ",") '"smtp":{"on":1,"to":""}'
         url := Trim(hookUrl)
         /* 勾了 Webhook 却没填 URL 等于没配：静默退回托盘，
            而不是存一条永远发不出去的规则。 */
@@ -545,7 +559,9 @@ class NoteWindow {
         if !TodoStore.Get(id)
             return
         ntf := NoteWindow.BuildNotify(JsonNum(raw, "mail", 0)
-            , JsonNum(raw, "hook", 0), JsonStr(raw, "hook_url", ""))
+            , JsonNum(raw, "hook", 0), JsonStr(raw, "hook_url", "")
+            , JsonNum(raw, "run", 0), JsonStr(raw, "exe", "")
+            , JsonStr(raw, "args", ""), JsonNum(raw, "wait", 0))
         res := Reminder.Add(id, Map(
             "kind", JsonStr(raw, "kind", "offset"),
             "anchor", JsonStr(raw, "anchor", "start"),
@@ -940,10 +956,29 @@ class NoteWindow {
     /* 待办便签的"这张便签"菜单。和普通便签共用同一套窗口能力（置顶/颜色/
        透明度/最大化/快捷键），换成待办独有的入口：新事项、新建待办便签。
        整页 Markdown 与"导入文件"没有，因为正文不在这一层。 */
+    /* 菜单回调。App.ExportTodoPack / ImportTodoPack 里会弹文件对话框，
+       必须跑在菜单回调这条独立线程上（不能塞进 COM 消息回调 —— 那里弹窗会把
+       整个程序冻住，这个坑在 P1 已经踩过一次）。 */
+    AskExportPack() {
+        App.ExportTodoPack(this.id)
+    }
+
+    AskImportPack(mode) {
+        App.ImportTodoPack(this.id, mode)
+    }
+
     ShowTodoNoteMenu() {
-        m := Menu()
-        m.Add("新事项`tCtrl+Enter", NoteWindow.MB(ObjBindMethod(this, "Cmd", "todo-add")))
+        m := Menu()        m.Add("新事项`tCtrl+Enter", NoteWindow.MB(ObjBindMethod(this, "Cmd", "todo-add")))
         m.Add("新建待办便签", (*) => App.NewTodoNote())
+        m.Add()
+        /* 待办包：导出是"留底"，导入是"换机器 / 合列表"。
+           追加与替换分成两项而不是导完再问 —— 用户在点之前就知道自己要哪种。 */
+        m.Add("导出待办包…", NoteWindow.MB(ObjBindMethod(this, "AskExportPack")))
+        isub := Menu()
+        isub.Add("追加到末尾…", NoteWindow.MB(ObjBindMethod(this, "AskImportPack", "append")))
+        isub.Add("替换全部…", NoteWindow.MB(ObjBindMethod(this, "AskImportPack", "replace")))
+        m.Add("导入待办包", isub)
+        m.Add()
         m.Add("便签列表…", (*) => NoteDeferList())
         m.Add("重命名…", NoteWindow.MB(ObjBindMethod(this, "Rename")))
         m.Add(this.note.hotkey ? "快捷键…（" NoteWindow.HotkeyPretty(this.note.hotkey) "）"

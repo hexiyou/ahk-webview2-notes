@@ -40,6 +40,7 @@
 #Include lib\pdf.ahk
 #Include lib\word.ahk
 #Include lib\notify.ahk
+#Include lib\todo-export.ahk
 
 class App {
     static Name := "QuickNote"
@@ -240,6 +241,8 @@ class App {
             SetTimer(SelfTestRemind, -2500)
         if App.HasArg("--selftest-notify")
             SetTimer(SelfTestNotify, -2500)
+        if App.HasArg("--selftest-todoio")
+            SetTimer(SelfTestTodoIO, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -477,6 +480,7 @@ class App {
         ListWindow.Hooks := Map(
             "onNew", NoteNew,
             "onNewTodo", NoteNewTodo,
+            "onImportTodo", NoteImportTodoPack,
             "onOpen", NoteOpen,
             "onDelete", NoteDelete,
             "onHide", NoteHide,
@@ -644,6 +648,7 @@ class App {
         switch fmt {
             case "pdf": Pdf.Save(n)
             case "docx": Word.Save(n)
+            case "qntodo": App.ExportTodoPack(id)
             default: Export.Save(n, fmt)
         }
     }
@@ -665,6 +670,128 @@ class App {
             case "docx": Word.SaveMany(notes)
             default: Export.SaveMany(notes, fmt)
         }
+    }
+
+    /* ---- 待办包（.qntodo）-------------------------------------------------
+       导出不改数据；导入改的是**当前这张**待办便签（追加或替换）。
+       这里只做"选文件 + 说人话"两件事，格式与图片处理都在 lib\todo-export.ahk：
+       那部分要能被自检直接调，而自检不该去点文件对话框。 */
+    static ExportTodoPack(id) {
+        n := App.Store.Get(id)
+        if !n {
+            App.Toast("这张便签已经不在了")
+            return
+        }
+        if (n.kind != "todo") {
+            App.Toast("只有待办便签能导出成 .qntodo")
+            return
+        }
+        /* 关联便签会把整张便签的正文和图片一起打进包（可能比事项本身还大）。
+           有关联时先问一句：想轻装搬走的用户不该被迫拖着一堆附件。 */
+        nlink := 0
+        for it in TodoStore.Items(id) {
+            if (it.link_note_id)
+                nlink++
+        }
+        withLinks := 1
+        if (nlink > 0) {
+            r := MsgBox("这张便签有 " nlink " 个事项关联了其它便签。`n`n"
+                . "要一起打包吗？不含的话，包到别的机器上关联会失效。"
+                , "导出待办包", "YesNo Icon? Default1")
+            withLinks := (r = "Yes") ? 1 : 0
+        }
+        stem := Trim(n.title) = "" ? "待办" : n.title
+        stem := RegExReplace(stem, '[\\/:*?"<>|]', "_")
+        f := FileSelect("S", stem ".qntodo"
+            , "导出待办包 —— " n.title, "待办包 (*.qntodo)")
+        if (f = "")
+            return
+        SplitPath f, , , &e
+        if (StrLower(e) != "qntodo")
+            f .= ".qntodo"
+        res := TodoExport.Save(id, f, Map("links", withLinks))
+        if !res.ok {
+            App.Toast(res.msg)
+            return
+        }
+        msg := "已导出 " res.items " 个事项"
+        if (res.images > 0)
+            msg .= "、" res.images " 张图片"
+        if (res.links > 0)
+            msg .= "、" res.links " 张关联便签"
+        if (res.missing > 0)
+            msg .= "（" res.missing " 张图的源文件不在了）"
+        App.Toast(msg)
+    }
+
+    static ImportTodoPack(id, mode := "append") {
+        n := App.Store.Get(id)
+        if !n {
+            App.Toast("这张便签已经不在了")
+            return
+        }
+        if (n.kind != "todo") {
+            App.Toast("只能导入到待办便签里")
+            return
+        }
+        f := FileSelect(1, "", "导入待办包", "待办包 (*.qntodo)")
+        if (f = "")
+            return
+        replace := (mode = "replace")
+        /* 替换是不可撤销的：先把"会删掉几条"说清楚再问。 */
+        if replace {
+            cnt := TodoStore.Count(id)
+            if (cnt > 0) {
+                r := MsgBox("替换会先清空当前 " cnt " 个事项，且无法撤销。`n`n要继续吗？"
+                    , "导入待办包", "YesNo Icon? Default2")
+                if (r != "Yes")
+                    return
+            }
+        }
+        res := TodoExport.Load(f, id, Map("replace", replace))
+        if !res.ok {
+            App.Toast(res.msg)
+            return
+        }
+        App.Toast(res.msg)
+        if NoteWindow.All.Has(id)
+            NoteWindow.All[id].PushItems()
+    }
+
+    /* 列表页入口：新建一张待办便签并把包导进去。
+       这是"换机器"的主路径 —— 包拿到手，不用先手动建一张空待办。
+       先 Peek 校验再建窗：包是坏的就别在列表里留一张空便签。 */
+    static ImportTodoPackNew() {
+        f := FileSelect(1, "", "导入待办包", "待办包 (*.qntodo)")
+        if (f = "")
+            return
+        pk := TodoExport.Peek(f)
+        if !pk.ok {
+            App.Toast(pk.msg)
+            return
+        }
+        w := App.NewTodoNote(Map("title", pk.title, "activate", 1))
+        if !w {
+            App.Toast("建不出待办便签")
+            return
+        }
+        /* 等页面就绪再导：PushItems 是直接发消息，页面还没加载时发出去会丢，
+           用户看到的是"导入成功但列表是空的"。最多等 2 秒，正常几百毫秒。 */
+        Loop 40 {
+            if w.ready
+                break
+            Sleep 50
+        }
+        res := TodoExport.Load(f, w.id)
+        if !res.ok {
+            App.Toast(res.msg)
+            return
+        }
+        App.Toast(res.msg)
+        w.PushItems()
+        /* 建窗时列表已经刷过一次，但事项是之后才导进去的 ——
+           进度「3/7」和「含图片」角标都要重算。 */
+        App.RefreshList()
     }
 
     /* ---- 导入 ---------------------------------------------------------------
@@ -1939,6 +2066,19 @@ SelfTestOpacity() {
    所以"两个便签用同一个键"不会自己暴露。本机 SendInput 会把程序卡死，
    所以这里不真按键，只验注册表、唤起逻辑和列表角标。 */
 SelfTestHotkey() {
+    /* 先把库里其它便签挂着的键临时摘下来。共享测试目录（data\_st）跑过一串
+       自检之后，往往已经有 10 张便签占满上限，下面第一句
+       App.SetNoteHotkey 就会因为"超过总数上限"被拒 —— 表现出来是
+       「设置=失败」，跟热键逻辑一点关系都没有。跑完再挂回去。 */
+    saved := []
+    for n in App.Store.All() {
+        if (n.hotkey != "") {
+            saved.Push({id: n.id, key: n.hotkey})
+            try App.Store.SetHotkey(n.id, "")
+        }
+    }
+    App.RebindNoteHotkeys()
+
     ids := []
     id1 := App.Store.Create(Map("title", "快捷一", "body_text", "a"))
     id2 := App.Store.Create(Map("title", "快捷二", "body_text", "b"))
@@ -2007,6 +2147,10 @@ SelfTestHotkey() {
         try App.Store.Delete(i)
     for i in ids
         try App.DeleteNote(i)
+    /* 把开跑前摘下来的键挂回去。某个键在这期间被别人占了就跳过 ——
+       不能因为"恢复失败"把整个自检判成未通过。 */
+    for s in saved
+        try App.Store.SetHotkey(s.id, s.key)
     App.RebindNoteHotkeys()
     Sleep 400
 
@@ -4614,6 +4758,7 @@ RichStyle(w, cmd, tag, wantMd, label) {
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
 NoteNewTodo() => App.NewTodoNote()
+NoteImportTodoPack() => App.ImportTodoPackNew()
 
 /* 测试邮件要 2～20 秒，必须在独立线程里跑（SetTimer 起的伪线程），
    不能直接占着 WebView2 的 COM 回调。 */
@@ -4653,6 +4798,265 @@ NoteApplySettings(raw) => App.ApplySettings(raw)
    —— 那会重现"点完菜单什么都没反应"的老 bug。统一换到独立线程。 */
 NoteShowSettings() {
     SetTimer(NoteOpenSettings, -10)
+}
+
+/* 自检：待办包（.qntodo）导出 → 导入 → 逐字段比对。
+   全程不建窗口：导出/导入是纯数据层的事，建窗只会让自检慢十倍，
+   还会掺进 WebView2 的时序噪音 —— 真出问题时反而看不清是哪一层坏了。 */
+SelfTestTodoIO() {
+    try SelfTestTodoIORun()
+    catch as e {
+        App.Log("SELFTEST TODOIO 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST TODOIO 结论：未通过（异常）")
+    } finally {
+        SelfTestDone()
+    }
+}
+
+SelfTestTodoIORun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    App.TickOn := 0
+    Reminder.Clock := 0
+    base := Store.Now()
+
+    imgPath := ExportTestImage()
+    imgUrl := "file:///" StrReplace(imgPath, "\", "/")
+    packPath := App.DataDir "\_todoio.qntodo"
+    badPath := App.DataDir "\_todoio-bad.qntodo"
+    try FileDelete packPath
+    try FileDelete badPath
+
+    /* 图片 URL 要能被 Export.UrlToPath 还原成本机路径，前提是数据目录是绝对的。
+       这条单独断言：一旦有人把 --data-dir 改成相对路径，后面所有图片断言都会
+       挂在一个看不出原因的地方。 */
+    RichSay("数据目录是绝对路径", SubStr(App.DataDir, 2, 1) = ":", App.DataDir)
+
+    ; ---- 1. 造源数据 ------------------------------------------------------
+    srcID := App.Store.Create(Map("kind", "todo", "title", "自检待办包", "color", "blue"))
+    linkID := App.Store.Create(Map("kind", "note", "title", "上线检查单"
+        , "body_html", '<p>检查项</p><img src="' imgUrl '">'
+        , "body_md", "- 检查项" Chr(10) Chr(10) "![图](1.png)"
+        , "body_text", "检查项"))
+
+    aID := TodoStore.Add(srcID, Map("title", "提交季度报表"
+        , "body_html", "<p>报表正文</p>"
+        , "body_md", "报表正文"
+        , "body_text", "报表正文"
+        , "status", "todo"
+        , "start_at", base + 3600
+        , "due_at", base + 7200
+        , "seq", 1000))
+    bID := TodoStore.Add(srcID, Map("title", "上线发布"
+        , "body_html", '<p>发版</p><img src="' imgUrl '">'
+        , "body_md", "发版" Chr(10) Chr(10) "![图](1.png)"
+        , "body_text", "发版"
+        , "status", "doing"
+        , "start_at", base + 7200
+        , "due_at", 0
+        , "seq", 2000
+        , "link_note_id", linkID))
+
+    Reminder.Add(aID, Map("kind", "offset", "anchor", "start", "offset_min", 30
+        , "notify", '{"smtp":{"on":1,"to":""}}'))
+    Reminder.Add(bID, Map("kind", "daily", "anchor", "start"
+        , "days_before", 2, "at_time", "09:00"
+        , "notify", '{"run":{"on":1,"exe":"C:\\Windows\\notepad.exe","args":"","wait":0}}'))
+    RichSay("源数据造好了（2 事项 / 2 提醒 / 1 关联 / 1 图）"
+        , TodoStore.Count(srcID) = 2 && Reminder.ForTodo(aID).Length = 1
+            && Reminder.ForTodo(bID).Length = 1, TodoStore.Count(srcID))
+
+    ; ---- 2. 导出 ----------------------------------------------------------
+    ex := TodoExport.Save(srcID, packPath)
+    RichSay("导出成功", ex.ok = 1, ex.ok ? "" : ex.msg)
+    RichSay("文件真的写出来了", FileExist(packPath))
+    RichSay("包里 2 个事项", ex.items = 2, ex.items)
+    RichSay("包里 1 张图", ex.images = 1, ex.images)
+    RichSay("包里 1 张关联便签", ex.links = 1, ex.links)
+
+    raw := ""
+    try raw := FileRead(packPath, "UTF-8")
+    RichSay("包里写着格式名", InStr(raw, '"kind":"quicknote.todo"') > 0)
+    RichSay("包里写着版本号", InStr(raw, '"schema":1') > 0)
+    RichSay("正文里的图换成了 qnimg://", InStr(raw, "qnimg://_export-test.png") > 0)
+    /* 绝对路径不能漏进包里：漏了的话，包到另一台机器就指向一个不存在的文件，
+       症状是"包里明明有图，打开是破图" —— 这类问题用户根本没法自查。 */
+    RichSay("包里没有本机绝对路径"
+        , InStr(raw, StrReplace(imgPath, "\", "/")) = 0)
+    RichSay("关联便签用临时 id（n1），不是真 id"
+        , InStr(raw, '"exportId":"n1"') > 0 && InStr(raw, '"linkNote":"n1"') > 0)
+
+    /* 不含关联便签的另一种导出：包更小，但事项上的关联会失效 ——
+       这是个明确的取舍，不是"顺手漏掉"，所以两种都要有自检。 */
+    nlPath := App.DataDir "\_todoio-nolink.qntodo"
+    ex2 := TodoExport.Save(srcID, nlPath, Map("links", 0))
+    raw2 := ""
+    try raw2 := FileRead(nlPath, "UTF-8")
+    RichSay("选择不含关联：包里 linkedNotes 是空的"
+        , ex2.ok = 1 && ex2.links = 0 && InStr(raw2, '"linkedNotes":[]') > 0
+        , ex2.ok ? ex2.links : ex2.msg)
+    RichSay("不含关联时 linkNote 也留空"
+        , InStr(raw2, '"linkNote":"n1"') = 0)
+    try FileDelete nlPath
+
+    ; ---- 3. 导入到一张新便签 ----------------------------------------------
+    dstID := App.Store.Create(Map("kind", "todo", "title", "导入目标"))
+    im := TodoExport.Load(packPath, dstID)
+    RichSay("导入成功", im.ok = 1, im.ok ? im.msg : im.msg)
+    RichSay("导入了 2 个事项", im.items = 2, im.items)
+    RichSay("导入了 2 条提醒", im.reminders = 2, im.reminders)
+    RichSay("导入了 1 张图", im.images = 1, im.images)
+
+    items := TodoStore.Items(dstID)
+    RichSay("库里确实是 2 条", items.Length = 2, items.Length)
+    ia := items.Length >= 1 ? items[1] : 0
+    ib := items.Length >= 2 ? items[2] : 0
+    RichSay("标题一致", ia && ib && ia.title = "提交季度报表" && ib.title = "上线发布"
+        , (ia ? ia.title : "?") " / " (ib ? ib.title : "?"))
+    RichSay("状态一致", ia && ib && ia.status = "todo" && ib.status = "doing"
+        , (ia ? ia.status : "?") " / " (ib ? ib.status : "?"))
+    RichSay("开始/截止时间一致"
+        , ia && ia.start_at = base + 3600 && ia.due_at = base + 7200
+        , ia ? Reminder.Text(ia.start_at) " / " Reminder.Text(ia.due_at) : "?")
+    RichSay("顺序一致（seq 小的在前）", ia && ib && ia.seq < ib.seq
+        , ia && ib ? ia.seq " / " ib.seq : "?")
+    RichSay("正文跑完一圈没丢"
+        , ia && ia.body_md = "报表正文" && ib && InStr(ib.body_md, "发版") > 0
+        , ia ? ia.body_md : "?")
+
+    ; ---- 4. 关联重映射 ----------------------------------------------------
+    ln := ib ? App.Store.Get(ib.link_note_id) : 0
+    RichSay("关联便签是重新建的，不是原来那张"
+        , ib && ib.link_note_id > 0 && ib.link_note_id != linkID
+        , ib ? ib.link_note_id " vs " linkID : "?")
+    RichSay("关联便签标题对得上", ln && ln.title = "上线检查单"
+        , ln ? ln.title : "没关联上")
+
+    ; ---- 5. 图片：字节级比对 ----------------------------------------------
+    /* 只看"文件存在"不算数：解码错一个字节，图就是花的，文件照样存在。
+       1x1 的图看不出花不花，所以必须比字节。 */
+    newImg := ""
+    if ib && RegExMatch(ib.body_html, 'i)src="(file:///[^"]+)"', &mm)
+        newImg := Export.UrlToPath(mm[1])
+    RichSay("导入后的图指向本机文件", newImg != "" && FileExist(newImg), newImg)
+    RichSay("图片字节与原图一致"
+        , newImg != "" && SelfTestFileEq(newImg, imgPath), newImg)
+    RichSay("关联便签里的图也还原了"
+        , ln && InStr(ln.body_html, "qnimg://") = 0
+            && InStr(ln.body_html, "file:///") > 0)
+
+    ; ---- 6. 提醒 ----------------------------------------------------------
+    ra := ia ? Reminder.ForTodo(ia.id) : []
+    rb := ib ? Reminder.ForTodo(ib.id) : []
+    RichSay("A 的提醒回来了（提前 30 分钟）"
+        , ra.Length = 1 && ra[1].kind = "offset" && ra[1].offset_min = 30
+        , ra.Length ? ra[1].text : "没有")
+    ca := ra.Length ? Notify.Channels(ra[1].notify) : []
+    RichSay("A 的邮件通道一起回来"
+        , ca.Length = 1 && ca[1].kind = "smtp"
+        , ra.Length ? ra[1].notify : "")
+    RichSay("B 的提醒回来了（每天）"
+        , rb.Length = 1 && rb[1].kind = "daily" && rb[1].days_before = 2
+        , rb.Length ? rb[1].text : "没有")
+    cb := rb.Length ? Notify.Channels(rb[1].notify) : []
+    RichSay("B 的程序通道一起回来"
+        , cb.Length = 1 && cb[1].kind = "run"
+        , rb.Length ? rb[1].notify : "")
+
+    ; ---- 7. 追加 / 替换 ----------------------------------------------------
+    im2 := TodoExport.Load(packPath, dstID)
+    RichSay("再次追加：事项翻倍", im2.ok = 1 && TodoStore.Count(dstID) = 4
+        , TodoStore.Count(dstID))
+    firstID := TodoStore.Items(dstID)[1].id
+    im3 := TodoExport.Load(packPath, dstID, Map("replace", 1))
+    RichSay("替换导入：回到 2 条", im3.ok = 1 && TodoStore.Count(dstID) = 2
+        , TodoStore.Count(dstID))
+    RichSay("替换确实清掉了旧事项（id 全变了）"
+        , TodoStore.Items(dstID)[1].id != firstID)
+
+    ; ---- 8. 坏包一律拒绝 ---------------------------------------------------
+    SelfTestWrite(badPath, '{"schema":99,"kind":"quicknote.todo","items":[]}')
+    bad1 := TodoExport.Load(badPath, dstID)
+    RichSay("schema 过高：拒绝，并让人去升级"
+        , bad1.ok = 0 && InStr(bad1.msg, "升级") > 0, bad1.msg)
+
+    SelfTestWrite(badPath, '{"schema":1,"kind":"别的东西","items":[]}')
+    bad2 := TodoExport.Load(badPath, dstID)
+    RichSay("不是待办包：拒绝"
+        , bad2.ok = 0 && InStr(bad2.msg, "不是待办包") > 0, bad2.msg)
+
+    SelfTestWrite(badPath, "")
+    bad3 := TodoExport.Load(badPath, dstID)
+    RichSay("空文件：拒绝", bad3.ok = 0, bad3.msg)
+
+    /* 导错类型：普通便签不能导出成待办包 */
+    bad4 := TodoExport.Save(linkID, packPath)
+    RichSay("普通便签不能导出成 .qntodo", bad4.ok = 0, bad4.msg)
+
+    ; ---- 9. 收尾 ----------------------------------------------------------
+    /* 先删导入时新建的关联便签，再删两张待办便签，最后删文件。
+       留着会在共享数据目录里堆垃圾，下一轮自检的窗口数就对不上了。 */
+    for it in TodoStore.Items(dstID) {
+        if (it.link_note_id)
+            try App.Store.Delete(it.link_note_id)
+    }
+    try App.Store.Delete(dstID)
+    try App.Store.Delete(srcID)
+    try App.Store.Delete(linkID)
+    try FileDelete packPath
+    try FileDelete badPath
+    try FileDelete imgPath
+    if (newImg != "")
+        try FileDelete newImg
+    /* 每次导入都会为同一张图落一份新文件（-1、-2…），这是对的行为：
+       两次导入就是两份独立数据，不该共享一个文件。但自检得自己扫干净。 */
+    Loop Files, App.DataDir "\images\_export-test*.png"
+        try FileDelete A_LoopFileFullPath
+
+    App.Log("SELFTEST TODOIO 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+}
+
+/* 自检辅助：两文件字节级相等。用 memcmp 而不是转字符串比 ——
+   PNG 里到处是 \0，一转字符串就截断，两张完全不同的图也会"相等"。 */
+SelfTestFileEq(a, b) {
+    if !FileExist(a) || !FileExist(b)
+        return 0
+    sa := 0
+    sb := 0
+    try sa := FileGetSize(a)
+    try sb := FileGetSize(b)
+    if (sa <= 0 || sa != sb)
+        return 0
+    fa := 0
+    fb := 0
+    try fa := FileOpen(a, "r")
+    try fb := FileOpen(b, "r")
+    if (!fa || !fb) {
+        if fa
+            fa.Close()
+        if fb
+            fb.Close()
+        return 0
+    }
+    ba := Buffer(sa, 0)
+    bb := Buffer(sb, 0)
+    fa.RawRead(ba)
+    fb.RawRead(bb)
+    fa.Close()
+    fb.Close()
+    return DllCall("msvcrt\memcmp", "ptr", ba, "ptr", bb, "ptr", sa, "int") = 0 ? 1 : 0
+}
+
+/* 自检辅助：写一个小文本文件（内容原样，不追加） */
+SelfTestWrite(path, text) {
+    try FileDelete path
+    try {
+        f := FileOpen(path, "w", "UTF-8")
+        if f {
+            f.Write(text)
+            f.Close()
+        }
+    }
 }
 
 NoteOpenSettings() => App.ShowSettings()
@@ -4786,6 +5190,49 @@ SelfTestRemindRun() {
         , InStr(JStr(RichEval(w, "__todo.foot(0)")), "提醒 1 条") > 0
         , JStr(RichEval(w, "__todo.foot(0)")))
 
+    ; ---- 2b. 通道：勾「运行程序」 ----------------------------------------
+    /* 走真 UI（勾框 + 填路径 + 点「加一条」）。这里盯三件事：
+       页面拼出来的 notify 能被宿主解析、反斜杠路径往返不坏、
+       规则行能看出这条走程序 —— 少一样，用户勾完就等于配了个寂寞。 */
+    RichEval(w, "__todo.remCh({run:1, exe:'C:\\Tools\\ping.exe', args:'/n 1 {title}', wait:1})")
+    Loop 20 {
+        if (Reminder.ForTodo(it.id).Length >= 2)
+            break
+        Sleep 100
+    }
+    Sleep 200
+    rq := Reminder.ForTodo(it.id)
+    RichSay("勾「运行程序」后规则真的多一条", rq.Length = 2, rq.Length)
+    q := rq.Length = 2 ? rq[2] : 0
+    chq := q ? Notify.Channels(q.notify) : []
+    RichSay("库里存下的 notify 能解析出 run 通道"
+        , chq.Length = 1 && chq[1].kind = "run", q ? q.notify : "没加进去")
+    RichSay("程序路径和参数原样存下来"
+        , chq.Length = 1 && chq[1].cfg["exe"] = "C:\Tools\ping.exe"
+            && chq[1].cfg["args"] = "/n 1 {title}"
+        , chq.Length ? chq[1].cfg["exe"] " | " chq[1].cfg["args"] : "?")
+    RichSay("面板这一行标出了通道"
+        , InStr(JStr(RichEval(w, "__todo.remText(1)")), "程序") > 0
+        , JStr(RichEval(w, "__todo.remText(1)")))
+    /* 勾了程序却不填路径：页面当场拦下来，不落库、不静默存一条废规则 */
+    n0 := Reminder.ForTodo(it.id).Length
+    RichEval(w, "__todo.remChNoSubmit({run:1})")
+    RichEval(w, "__todo.remSubmit()")
+    Sleep 300
+    RichSay("勾了程序没填路径 → 不落库"
+        , Reminder.ForTodo(it.id).Length = n0, Reminder.ForTodo(it.id).Length)
+    RichSay("并且面板说明原因"
+        , InStr(JStr(RichEval(w, "__todo.remHint()")), "没填程序路径") > 0
+        , JStr(RichEval(w, "__todo.remHint()")))
+    RichEval(w, "__todo.remDel(1)")
+    Sleep 400
+    RichSay("删掉这条通道规则，回到一条", Reminder.ForTodo(it.id).Length = 1
+        , Reminder.ForTodo(it.id).Length)
+
+    ; 清掉上一个用例留在勾选框里的半截配置。remSet 只改时间参数、通道沿用
+    ; 当前勾选，不清的话"勾了程序没填路径"会把这里也拦住（这正是拦截该有的样子，
+    ; 但用例之间得自己收拾干净）。
+    RichEval(w, "__todo.remChNoSubmit({})")
     ; daily 也走一遍 UI（单位/天数在页面侧换算）
     RichEval(w, "__todo.remSet('daily','',0,1,1,'09:00')")
     Sleep 500
@@ -5380,6 +5827,37 @@ SelfTestNotifyRun() {
         NT_Say("两个开关都不勾 → 空串（退回托盘）"
             , NoteWindow.BuildNotify(0, 0, "http://x/y") = "")
         NT_Say("空 notify 解析成 0 个通道", Notify.Channels("").Length = 0)
+
+        /* ---- 6. run 通道（运行外部程序 / 命令） ---------------------------- */
+        r1 := NoteWindow.BuildNotify(0, 0, "", 1, "C:\Windows\notepad.exe", "", 0)
+        cr := Notify.Channels(r1)
+        NT_Say("勾「运行程序」→ 解析出 1 个 run 通道"
+            , cr.Length = 1 && cr[1].kind = "run", r1)
+        /* 这条盯的是 JsonQuote 的转义：Windows 路径全是反斜杠，
+           少转一层就会在 JsonStr 那头变成转义序列，路径直接坏掉。 */
+        NT_Say("程序路径的反斜杠完整往返"
+            , cr.Length = 1 && cr[1].cfg["exe"] = "C:\Windows\notepad.exe"
+            , cr.Length ? cr[1].cfg["exe"] : "解析失败")
+        NT_Say("默认不等待（wait=0）", cr.Length = 1 && cr[1].cfg["wait"] = 0)
+
+        r2 := NoteWindow.BuildNotify(0, 0, "", 1, "cmd.exe", "/c echo {title}", 1)
+        cr2 := Notify.Channels(r2)
+        NT_Say("参数与等待模式都带过去了"
+            , cr2.Length = 1 && cr2[1].cfg["args"] = "/c echo {title}"
+                && cr2[1].cfg["wait"] = 1
+            , cr2.Length ? cr2[1].cfg["args"] " wait=" cr2[1].cfg["wait"] : "解析失败")
+
+        NT_Say("勾了运行程序但路径空白 → 不存通道（退回托盘）"
+            , NoteWindow.BuildNotify(0, 0, "", 1, "   ", "", 1) = "")
+
+        /* 三种一起勾：顺序取自 Notify.ORDER（run → webhook → smtp），
+           界面上不显示顺序，但投递是按这个顺序逐条 try 的，得稳定。 */
+        all3 := NoteWindow.BuildNotify(1, 1, "http://x/y", 1, "a.exe", "", 0)
+        ca := Notify.Channels(all3)
+        NT_Say("三种通道共存，顺序按 ORDER 稳定"
+            , ca.Length = 3 && ca[1].kind = "run" && ca[2].kind = "webhook"
+                && ca[3].kind = "smtp"
+            , ca.Length ? ca[1].kind "/" ca[2].kind "/" ca[3].kind : "解析失败")
     } catch as e {
         NT_Say("自检自身没抛异常", 0, CleanComError(e.Message) " @" e.Line)
     }
