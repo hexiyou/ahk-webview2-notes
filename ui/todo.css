@@ -1,0 +1,357 @@
+/* ============================================================================
+   todo.css —— 待办便签页
+
+   note.css 先加载，主题变量（--note-rgb / --accent / --fs）、富文本排版
+   （.editor h1/pre/code/img/.chk）、图片遮罩、代码复制按钮、浮动工具条全部
+   复用 —— 两个页面是"同一张便签的不同内容"，长相不能分叉。
+
+   这里只写待办独有的东西：操作条、事项卡片、状态/时间胶囊、行内弹层、
+   单事项 Markdown 面板。
+
+   卡片里的正文节点同时带 .editor 类（见 todo.js），所以 h1/pre/img/.chk
+   这些样式一行都不用重写；下面只把它从"整页唯一的编辑区"改回"卡片里的一块"。
+   ========================================================================== */
+
+/* ---- 操作条 ------------------------------------------------------------ */
+
+.todotools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px 6px;
+  -webkit-app-region: no-drag;
+  user-select: none;
+}
+
+.todotools .add {
+  padding: 3px 9px;
+  border: 1px solid rgba(0, 0, 0, .14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .55);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color .15s, border-color .15s;
+}
+.todotools .add:hover { background: rgba(255, 255, 255, .85); border-color: var(--accent); }
+
+.todotools .flt {
+  padding: 2px 4px;
+  border: 1px solid rgba(0, 0, 0, .12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .5);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.grow { flex: 1 1 auto; }
+
+.prog {
+  font-size: 12px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.prog b { color: var(--fg); font-weight: 600; }
+.prog .od { color: #c0392b; }
+
+/* ---- 事项列表 ---------------------------------------------------------- */
+
+.items {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 8px 8px;
+  -webkit-app-region: no-drag;
+}
+
+.ti {
+  position: relative;
+  margin: 0 0 7px;
+  padding: 5px 7px 4px;
+  border: 1px solid rgba(0, 0, 0, .07);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .42);
+  transition: background-color .15s, box-shadow .15s, opacity .15s;
+}
+.ti:hover { background: rgba(255, 255, 255, .58); }
+.ti.done { opacity: .72; }
+.ti.dragging { opacity: .45; }
+/* 拖动时落点提示：一条贴着卡片上/下边的实线，比整块高亮更容易看清 */
+.ti.drop-before { box-shadow: 0 -2px 0 var(--accent); }
+.ti.drop-after { box-shadow: 0 2px 0 var(--accent); }
+.ti.hidden { display: none; }
+
+.ti-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+}
+
+/* 拖动把手。只有在它上面按下才把卡片变成 draggable —— 否则正文里选字
+   会变成拖卡片（HTML5 拖拽会吃掉文本选区）。 */
+.ti-grip {
+  flex: 0 0 auto;
+  width: 12px;
+  text-align: center;
+  color: var(--fg-dim);
+  opacity: .45;
+  cursor: grab;
+  user-select: none;
+  letter-spacing: -1px;
+}
+.ti:hover .ti-grip { opacity: .9; }
+.ti-grip:active { cursor: grabbing; }
+
+/* 勾选框。这里不用 note.css 的 .chk：那个的 margin-top 是按富文本行盒算的，
+   卡片头部是 flex 居中，直接复用会偏上半个字。 */
+.ti-chk {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border: 1.5px solid rgba(0, 0, 0, .38);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.ti-chk[data-on="1"] { background: var(--accent); border-color: var(--accent); }
+.ti-chk[data-on="1"]::after {
+  content: "";
+  width: 4px;
+  height: 8px;
+  margin-top: -2px;
+  border: solid #fff;
+  border-width: 0 1.8px 1.8px 0;
+  transform: rotate(42deg);
+}
+.ti-chk[data-on="2"] {
+  /* 已取消：一条斜杠，和"已完成"一眼分得开 */
+  background: transparent;
+  border-color: rgba(0, 0, 0, .25);
+}
+.ti-chk[data-on="2"]::after {
+  content: "";
+  width: 9px;
+  height: 1.5px;
+  background: rgba(0, 0, 0, .35);
+  transform: rotate(-45deg);
+}
+
+.ti-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  outline: none;
+}
+.ti-title::placeholder { color: var(--fg-dim); opacity: .6; font-weight: 400; }
+.ti-title:focus { background: rgba(255, 255, 255, .6); }
+.ti.done .ti-title { text-decoration: line-through; color: var(--fg-dim); }
+
+/* 状态 / 时间胶囊 */
+.pill {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, .12);
+  background: rgba(255, 255, 255, .5);
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.pill:hover { border-color: var(--accent); color: var(--fg); }
+.pill.auto { border-style: dashed; }
+
+/* 状态色：只改颜色不改语义，红色只留给"逾期" */
+.pill.st-todo { }
+.pill.st-doing { color: #2f6ea8; border-color: rgba(47, 110, 168, .35); }
+.pill.st-done { color: #3f7d43; border-color: rgba(63, 125, 67, .35); }
+.pill.st-canceled { color: var(--fg-dim); text-decoration: line-through; }
+
+.pill.due-soon { color: #b8770b; border-color: rgba(184, 119, 11, .4); }
+.pill.due-over { color: #c0392b; border-color: rgba(192, 57, 43, .45); background: rgba(255, 235, 232, .8); }
+.pill.no-time { opacity: .55; }
+
+.ti-btn {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: .5;
+}
+.ti:hover .ti-btn { opacity: .85; }
+.ti-btn:hover { background: rgba(0, 0, 0, .07); color: var(--fg); }
+.ti-btn.link-ok { color: var(--accent); opacity: .95; }
+.ti-btn.link-dead { opacity: .3; cursor: default; }
+
+/* 卡片里的正文。.editor 给了排版，这里只改"整页编辑区"才需要的那些属性。 */
+.ti-body {
+  flex: none;
+  padding: 2px 4px 2px 22px;
+  overflow: visible;
+  min-height: 0;
+  line-height: 1.55;
+  cursor: text;
+}
+.ti-body:empty::before,
+.ti-body.empty::before {
+  content: attr(data-placeholder);
+  color: var(--fg-dim);
+  opacity: .5;
+  pointer-events: none;
+}
+.ti.closed .ti-body { display: none; }
+
+.ti-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 0 22px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* ---- 空状态 ------------------------------------------------------------ */
+
+.empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.empty[hidden] { display: none; }
+.empty .sub { font-size: 12px; opacity: .75; line-height: 1.5; }
+
+/* ---- 时间弹层 ---------------------------------------------------------- */
+
+.tp {
+  position: fixed;
+  z-index: 40;
+  width: 246px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(var(--note-rgb), .98);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .22), 0 0 0 1px rgba(0, 0, 0, .1);
+}
+.tp[hidden] { display: none; }
+.tp-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.tp-row label { flex: 0 0 auto; width: 56px; font-size: 12px; color: var(--fg-dim); }
+.tp-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid rgba(0, 0, 0, .16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .8);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+.tp-foot { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+
+.ghost, .primary {
+  padding: 3px 9px;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ghost { border: 1px solid rgba(0, 0, 0, .14); background: rgba(255, 255, 255, .6); color: var(--fg); }
+.ghost:hover { background: rgba(255, 255, 255, .95); }
+.primary { border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+.primary:hover { filter: brightness(1.08); }
+
+/* ---- 单事项 Markdown 面板 ---------------------------------------------- */
+
+.mdp {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  background: rgba(0, 0, 0, .28);
+}
+.mdp[hidden] { display: none; }
+
+.mdp-box {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  background: rgb(var(--note-rgb));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .3);
+  overflow: hidden;
+}
+.mdp-head {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid rgba(0, 0, 0, .08);
+}
+.mdp-head span { color: var(--fg); font-weight: 600; }
+.mdp textarea {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 10px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: "Cascadia Mono", "Consolas", "Sarasa Mono SC", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  tab-size: 2;
+}
+.mdp-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid rgba(0, 0, 0, .08);
+}
+
+/* ---- 滚动条：和便签本体一致（细、无按钮、悬停才显形） ------------------ */
+
+.items::-webkit-scrollbar { width: 8px; }
+.items::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background-clip: content-box;
+  background-color: rgba(0, 0, 0, .18);
+}
+.items::-webkit-scrollbar-thumb:hover { background-color: rgba(0, 0, 0, .3); }

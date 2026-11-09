@@ -1,6 +1,13 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Off
 #ErrorStdOut UTF-8
+/* 警告不要弹模态框。AHK 默认把"局部变量似乎从未赋值"这类警告弹成 MsgBox，
+   而这个程序是单 UI 线程 —— 框一弹，所有便签连同自检一起冻住（踩过：
+   自检脚本里函数名写错，框直接弹在用户屏幕上，整轮测试卡死）。
+   改成写 stdout：run.bat 的控制台里看得见，编译版看不到但不会阻塞。 */
+#Warn VarUnset, StdOut
+#Warn LocalSameAsGlobal, OutputDebug
+#Warn Unreachable, OutputDebug
 ; ============================================================================
 ;  QuickNote —— 桌面便签（AHK v2 + WebView2 + SQLite）
 ;
@@ -21,6 +28,7 @@
 #Include lib\json.ahk
 #Include lib\sqlite.ahk
 #Include lib\store.ahk
+#Include lib\todo-store.ahk
 #Include lib\export.ahk
 #Include lib\win.ahk
 #Include lib\clip.ahk
@@ -114,6 +122,9 @@ class App {
         }
         NoteWindow.Store := App.Store
         NoteWindow.Ctx := App.Ctx
+        /* 待办数据层复用同一条 SQLite 连接：主线程是唯一写入者，不另开连接
+           （另开会多一份 WAL 读写者，等于自己跟自己抢锁）。 */
+        TodoStore.Attach(App.Store)
         ; PDF 导出要自己建一个隐藏的 WebView2，路径跟便签窗口共用一套
         Pdf.Ctx := App.Ctx
 
@@ -201,6 +212,8 @@ class App {
             SetTimer(SelfTestPdf, -2500)
         if App.HasArg("--selftest-docx")
             SetTimer(SelfTestDocx, -2500)
+        if App.HasArg("--selftest-todo")
+            SetTimer(SelfTestTodo, -2500)
         if App.HasArg("--shot-settings")
             SetTimer(SelfTestShotSettings, -2500)
         if App.HasArg("--shot-code")
@@ -320,6 +333,51 @@ class App {
         return w
     }
 
+    /* 新建待办便签。和 NewNote 的区别只在 kind 与默认尺寸：
+       待办页要放下一张卡片（勾选框 + 标题 + 状态 + 时间 + 正文），
+       300×280 塞不下，默认给 460×540。用户拉过之后按库里的几何走。 */
+    static NewTodoNote(opts := 0) {
+        o := IsObject(opts) ? opts : Map()
+
+        color := Ipc.Opt(o, "color", "")
+        if (color = "" || !NoteWindow.Colors().Has(color))
+            color := App.Cfg("window", "todoColor", App.Cfg("window", "color", "yellow"))
+
+        pin := Ipc.Opt(o, "pin", 0) ? 1 : 0
+        activate := Ipc.Num(o, "activate", 1)
+
+        dw := Ipc.Num(o, "w", 0)
+        dh := Ipc.Num(o, "h", 0)
+        dw := (dw > 0) ? dw : App.Cfg("window", "todoWidth", 460)
+        dh := (dh > 0) ? dh : App.Cfg("window", "todoHeight", 540)
+        if (Ipc.Has(o, "hasXY") && o["hasXY"])
+            geo := Win.Clamp(Ipc.Num(o, "x", 0), Ipc.Num(o, "y", 0), dw, dh)
+        else
+            geo := Win.Cascade(App.Store.Count(), dw, dh)
+
+        /* 容器名：列表里得有个东西可看。用户可以在菜单里「重命名…」改掉；
+           改过之后（title_locked=1）不会再被任何自动逻辑覆盖 ——
+           待办这一层的自动标题只发生在事项上，不碰容器。 */
+        title := Ipc.Opt(o, "title", "")
+        if (Trim(title) = "")
+            title := "待办 " FormatTime(A_Now, "MM-dd")
+
+        id := App.Store.Create(Map(
+            "kind", "todo",
+            "title", title,
+            "color", color,
+            "x", geo.x, "y", geo.y, "w", geo.w, "h", geo.h,
+            "pinned", pin, "hidden", 0))
+
+        n := App.Store.Get(id)
+        w := NoteWindow(n)
+        if activate
+            w.ToFront()
+        App.RefreshList()
+        App.RefreshTray()
+        return w
+    }
+
     static OpenNote(id) {
         if NoteWindow.All.Has(id) {
             w := NoteWindow.All[id]
@@ -372,6 +430,7 @@ class App {
         ListWindow.Ctx := App.Ctx
         ListWindow.Hooks := Map(
             "onNew", NoteNew,
+            "onNewTodo", NoteNewTodo,
             "onOpen", NoteOpen,
             "onDelete", NoteDelete,
             "onHide", NoteHide,
@@ -921,6 +980,7 @@ class App {
         t.Delete()
         t.Add("便签列表…`tCtrl+Alt+L", (*) => NoteDeferList())
         t.Add("新建便签`tCtrl+Alt+N", (*) => NoteDeferNew())
+        t.Add("新建待办便签", (*) => NoteDeferTodo())
         t.Add()
         t.Add("全部显示", (*) => NoteShowAllSoon())
         t.Add("全部收起", (*) => App.HideAll())
@@ -4391,6 +4451,7 @@ RichStyle(w, cmd, tag, wantMd, label) {
 ; ---- 顶层包装：SetTimer / OnError 传类静态方法引用会踩坑，统一走这里 ----------
 NoteBootTick() => App.BootTick()
 NoteNew() => App.NewNote()
+NoteNewTodo() => App.NewTodoNote()
 ; 便签快捷键：热键回调只转一手，真正的"开窗/提到最前"在独立线程里做
 NoteSummonTick(id) => App.SummonNoteNow(id)
 NoteSummonBound(id) => () => App.SummonNote(id)
@@ -4453,6 +4514,287 @@ NoteOnError(e, mode) {
     if (App.LogPath = "")           ; 还没走到设日志那步，直接落程序目录
         NoteCrash(msg)
     return 1        ; 1 = 已处理，不弹模态框（弹了整个 UI 线程就冻住了）
+}
+
+/* ============================================================================
+   自检：待办便签（P1）
+   —— 数据层 + 页面两层都验。页面部分一律通过 window.__todo 调"真按钮/真防抖"，
+      不直接改 DOM 假装修好了：那样测出来的只是测试脚本自己。
+   ========================================================================== */
+SelfTestTodo() {
+    try SelfTestTodoRun()
+    catch as e {
+        App.Log("SELFTEST TODO 异常：" CleanComError(e.Message) " @" e.Line)
+        App.Log("SELFTEST TODO 结论：未通过（异常中断）")
+    }
+    SelfTestDone()
+}
+
+SelfTestTodoRun() {
+    Global RICH_PASS := 0, RICH_FAIL := 0
+    now := Store.Now()
+
+    ; ---- 0. 老库（v3）升级不丢数据 --------------------------------------
+    oldp := App.DataDir "\_selftest_v3.db"
+    for f in [oldp, oldp "-wal", oldp "-shm"]
+        if FileExist(f)
+            try FileDelete f
+    odb := Sqlite(oldp)
+    odb.Exec("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);")
+    odb.Exec("INSERT INTO meta(k,v) VALUES('schema_version','3');")
+    odb.Exec("CREATE TABLE notes(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        . " title TEXT NOT NULL DEFAULT '', body_html TEXT NOT NULL DEFAULT '',"
+        . " body_text TEXT NOT NULL DEFAULT '', body_md TEXT NOT NULL DEFAULT '',"
+        . " mode TEXT NOT NULL DEFAULT 'rich', color TEXT NOT NULL DEFAULT 'yellow',"
+        . " x INTEGER NOT NULL DEFAULT 0, y INTEGER NOT NULL DEFAULT 0,"
+        . " w INTEGER NOT NULL DEFAULT 300, h INTEGER NOT NULL DEFAULT 280,"
+        . " pinned INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0,"
+        . " title_locked INTEGER NOT NULL DEFAULT 0, opacity INTEGER NOT NULL DEFAULT 100,"
+        . " hotkey TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0,"
+        . " updated_at INTEGER NOT NULL DEFAULT 0);")
+    odb.Run("INSERT INTO notes(title, body_text) VALUES(?,?)", "老便签", "老正文")
+    odb.Exec("PRAGMA journal_mode=DELETE")
+    odb.Close()
+    ost := Store(oldp)
+    RichSay("老库升到 v4", ost.db.Scalar("SELECT v FROM meta WHERE k='schema_version'") = "4"
+        , ost.db.Scalar("SELECT v FROM meta WHERE k='schema_version'"))
+    old := ost.All()
+    RichSay("老库数据没丢", old.Length = 1 && old[1].body_text = "老正文"
+        , old.Length " / " (old.Length ? old[1].body_text : "?"))
+    RichSay("老行 kind 补成 note", old.Length && old[1].kind = "note"
+        , old.Length ? old[1].kind : "?")
+    ost.Close()
+
+    ; ---- 1. 新建待办便签 -------------------------------------------------
+    w := App.NewTodoNote(Map("activate", 0))
+    if !w {
+        App.Log("SELFTEST TODO 没能建出待办便签")
+        return
+    }
+    Loop 60 {
+        if w.ready
+            break
+        Sleep 100
+    }
+    RichSay("待办便签页面就绪", w.ready = 1, w.ready)
+    RichSay("便签 kind=todo", App.Store.KindOf(w.id) = "todo", App.Store.KindOf(w.id))
+    RichSay("默认窗口 460x540", w.note.w = 460 && w.note.h = 540
+        , w.note.w "x" w.note.h)
+    RichSay("装的是 todo.html", InStr(w.wv.Source, "todo.html") > 0, w.wv.Source)
+
+    ; 空列表时页面自动建第一条（省一次点击）
+    Loop 30 {
+        if (TodoStore.Count(w.id) >= 1)
+            break
+        Sleep 100
+    }
+    RichSay("空列表自动建了第一条", TodoStore.Count(w.id) = 1, TodoStore.Count(w.id))
+    RichSay("页面卡片数与事项数一致", JStr(RichEval(w, "__todo.count()")) = "1"
+        , JStr(RichEval(w, "__todo.count()")))
+
+    it1 := TodoStore.Items(w.id)[1]
+    RichSay("新事项默认未开始 / 时间为 0", it1.status = "todo" && it1.start_at = 0 && it1.due_at = 0
+        , it1.status " " it1.start_at "/" it1.due_at)
+    RichSay("第一条 seq=1000", it1.seq = 1000, it1.seq)
+
+    ; ---- 2. 标题与正文 ---------------------------------------------------
+    RichEval(w, "__todo.setTitle(0, '写方案')")
+    Sleep 250
+    RichSay("标题改名落库", TodoStore.Get(it1.id).title = "写方案"
+        , TodoStore.Get(it1.id).title)
+
+    RichEval(w, "__todo.setBody(0, '<div>第一行内容</div>')")
+    Sleep 800                              ; 400ms 防抖 + 余量
+    it1 := TodoStore.Get(it1.id)
+    RichSay("正文落库（body_html）", InStr(it1.body_html, "第一行内容") > 0, it1.body_html)
+    RichSay("body_md 同步", InStr(it1.body_md, "第一行内容") > 0, it1.body_md)
+    RichSay("body_text 同步", InStr(it1.body_text, "第一行内容") > 0, it1.body_text)
+    RichSay("便签摘要跟着变", InStr(App.Store.Get(w.id).body_text, "第一行内容") > 0
+        , App.Store.Get(w.id).body_text)
+    RichSay("列表摘要带清单", InStr(App.Store.Get(w.id).body_md, "- [ ] 写方案") > 0
+        , App.Store.Get(w.id).body_md)
+
+    ; 清空标题 → 按正文首行自动生成
+    RichEval(w, "__todo.setTitle(0, '')")
+    Sleep 250
+    RichSay("空标题按正文首行重算", TodoStore.Get(it1.id).title = "第一行内容"
+        , TodoStore.Get(it1.id).title)
+
+    ; ---- 3. 新增第二条 ---------------------------------------------------
+    RichEval(w, "__todo.add()")
+    Loop 30 {
+        if (TodoStore.Count(w.id) >= 2)
+            break
+        Sleep 100
+    }
+    RichSay("点「+ 新事项」多一条", TodoStore.Count(w.id) = 2, TodoStore.Count(w.id))
+    its := TodoStore.Items(w.id)
+    RichSay("新事项排在后面且 seq 递增", its[2].seq > its[1].seq
+        , its[1].seq "/" its[2].seq)
+    RichSay("进度显示 0/2", InStr(JStr(RichEval(w, "__todo.prog()")), "0/2") > 0
+        , JStr(RichEval(w, "__todo.prog()")))
+
+    ; ---- 4. 勾选完成 -----------------------------------------------------
+    RichEval(w, "__todo.chk(0)")
+    Loop 20 {
+        if (TodoStore.Get(it1.id).status = "done")
+            break
+        Sleep 100
+    }
+    it1 := TodoStore.Get(it1.id)
+    RichSay("勾选写 done 与 done_at", it1.status = "done" && it1.done_at > 0
+        , it1.status " " it1.done_at)
+    RichSay("卡片打上 done 类", JStr(RichEval(w, "__todo.hasClass(0,'.ti','done')")) = "1")
+    RichSay("勾选框显示为已勾", JStr(RichEval(w, "document.querySelectorAll('.ti-chk')[0].dataset.on")) = "1"
+        , JStr(RichEval(w, "document.querySelectorAll('.ti-chk')[0].dataset.on")))
+    RichSay("已完成项在清单里打勾", InStr(App.Store.Get(w.id).body_md, "- [x]") > 0
+        , App.Store.Get(w.id).body_md)
+    RichSay("进度变成 1/2", InStr(JStr(RichEval(w, "__todo.prog()")), "1/2") > 0
+        , JStr(RichEval(w, "__todo.prog()")))
+
+    ; ---- 5. 逾期只在非终态出现 -------------------------------------------
+    RichEval(w, "__todo.chk(0)")           ; 再点一次 → 回到 todo
+    Sleep 300
+    TodoStore.SetTimes(it1.id, now - 7200, now - 3600)
+    w.PushItems()
+    Sleep 250
+    RichSay("未完成 + 过期 → 胶囊标红"
+        , JStr(RichEval(w, "__todo.hasClass(0,'.tm','due-over')")) = "1"
+        , JStr(RichEval(w, "__todo.text(0,'.tm')")))
+    RichSay("逾期文案带时长", InStr(JStr(RichEval(w, "__todo.text(0,'.tm')")), "逾期") > 0
+        , JStr(RichEval(w, "__todo.text(0,'.tm')")))
+    RichSay("列表摘要计入逾期", TodoStore.Summary(w.id).overdue = 1
+        , TodoStore.Summary(w.id).overdue)
+    TodoStore.SetStatus(it1.id, "done")
+    w.PushItems()
+    Sleep 250
+    RichSay("完成后不再显示逾期"
+        , JStr(RichEval(w, "__todo.hasClass(0,'.tm','due-over')")) = "0")
+    RichSay("完成后摘要不再计逾期", TodoStore.Summary(w.id).overdue = 0
+        , TodoStore.Summary(w.id).overdue)
+    TodoStore.SetStatus(it1.id, "todo")
+    w.PushItems()
+    Sleep 200
+
+    ; ---- 6. 排序（箭头/拖动共用 MoveTo） ---------------------------------
+    before := TodoStore.Items(w.id)
+    TodoStore.MoveTo(w.id, before[2].id, 1)
+    w.PushItems()
+    Sleep 250
+    RichSay("移到第 1 位后 DOM 顺序跟着变"
+        , JStr(RichEval(w, "__todo.ids()[0]")) = String(before[2].id)
+        , JStr(RichEval(w, "__todo.ids()[0]")) " vs " before[2].id)
+    RichSay("库里顺序也变了", TodoStore.Items(w.id)[1].id = before[2].id
+        , TodoStore.Items(w.id)[1].id)
+    RichSay("拖动只改一条 seq？seq 仍严格递增", IsAscTodo(TodoStore.Items(w.id)))
+
+    ; ---- 7. 关联便签 / 关联失效 -----------------------------------------
+    nid := App.Store.Create(Map("title", "被关联的便签", "body_text", "正文"
+        , "body_md", "正文", "body_html", "<div>正文</div>"))
+    TodoStore.SetLink(it1.id, nid)
+    w.PushItems()
+    Sleep 250
+    RichSay("关联成功且拿得到标题", TodoStore.Get(it1.id).link_title = "被关联的便签"
+        , TodoStore.Get(it1.id).link_title)
+    /* 排过序之后 it1 未必在第一位，按 id 找它现在的位置再断言 */
+    ix := JStr(RichEval(w, "__todo.idx(" it1.id ")"))
+    RichSay("↗ 按钮点亮", JStr(RichEval(w, "__todo.hasClass(" ix ",'.lk','link-ok')")) = "1"
+        , "idx=" ix)
+    App.Store.Delete(nid)
+    w.PushItems()
+    Sleep 250
+    RichSay("被关联便签删除后关联清零、事项保留"
+        , TodoStore.Get(it1.id).link_note_id = 0 && TodoStore.Count(w.id) = 2)
+    ix := JStr(RichEval(w, "__todo.idx(" it1.id ")"))
+    RichSay("↗ 不再点亮", JStr(RichEval(w, "__todo.hasClass(" ix ",'.lk','link-ok')")) = "0")
+
+    ; ---- 8. 派生正文只读 -------------------------------------------------
+    htmlBefore := App.Store.Get(w.id).body_html
+    RichSay("SaveBody 拒绝写待办便签的正文"
+        , App.Store.SaveBody(w.id, "x", "<div>x</div>", "x", "x", "rich") = 0)
+    RichSay("拒绝之后派生正文没变", App.Store.Get(w.id).body_html = htmlBefore)
+
+    ; ---- 9. 筛选与窗口状态 -----------------------------------------------
+    RichEval(w, "__todo.filter('open')")
+    Sleep 150
+    RichSay("筛选「未完成」只留未完的", JStr(RichEval(w, "__todo.visible()")) = "2"
+        , JStr(RichEval(w, "__todo.visible()")))
+    TodoStore.SetStatus(TodoStore.Items(w.id)[1].id, "done")
+    w.PushItems()
+    Sleep 200
+    RichSay("筛选状态下完成一项，可见数跟着变"
+        , JStr(RichEval(w, "__todo.visible()")) = "1"
+        , JStr(RichEval(w, "__todo.visible()")))
+    RichEval(w, "__todo.filter('all')")
+    Sleep 150
+    RichSay("切回「全部」都在", JStr(RichEval(w, "__todo.visible()")) = "2"
+        , JStr(RichEval(w, "__todo.visible()")))
+
+    ; ---- 10. 时间弹层 ----------------------------------------------------
+    RichEval(w, "__todo.openTime(0)")
+    Sleep 150
+    RichSay("点时间胶囊能弹出行内面板", JStr(RichEval(w, "__todo.tpOpen()")) = "1")
+    tpv := FormatTime(A_Now, "yyyy-MM-dd") "T09:00:00"
+    RichEval(w, "__todo.tpSet('" tpv "', '" FormatTime(DateAdd(A_Now, 2, "Days"), "yyyy-MM-dd") "T18:30:00')")
+    Sleep 400
+    ita := TodoStore.Get(TodoStore.Items(w.id)[1].id)
+    RichSay("弹层里填的时间真的落了库", ita.start_at > 0 && ita.due_at > ita.start_at
+        , ita.start_at "/" ita.due_at)
+    RichSay("秒级精度（不是整分）", Mod(ita.start_at, 60) = 0 && ita.start_at > 0)
+
+    ; ---- 11. 单事项 Markdown 源码 ----------------------------------------
+    /* 按 id 定位卡片：排过序之后 DOM 第 N 张未必是库里第 N 条。
+       注意 '\n' 必须写成字面反斜杠 n —— AHK 的转义符是反引号，
+       真写成 `n 会被求值成真实换行，塞进 JS 单引号字符串就是语法错误。 */
+    mdid := TodoStore.Items(w.id)[1].id
+    mix := JStr(RichEval(w, "__todo.idx(" mdid ")"))
+    RichEval(w, "__todo.openMd(" mix ")")
+    Sleep 150
+    RichSay("能打开单事项 Markdown 面板", JStr(RichEval(w, "__todo.mdOpen()")) = "1"
+        , "idx=" mix)
+    RichEval(w, "__todo.setMd('- 甲\n- 乙')")
+    Sleep 500
+    bx := JStr(RichEval(w, "__todo.idx(" mdid ")"))
+    /* 别在 AHK 这边 InStr 判 "<li>"：RichEval 回来的 HTML 会被 JSON 转义成
+       \u003C，永远匹配不上。判定放 JS 里做，只回传 0/1。 */
+    RichSay("应用源码后正文变成渲染结果"
+        , JStr(RichEval(w, "__todo.bodyHTML(" bx ").indexOf('<li>') >= 0 ? 1 : 0")) = "1"
+        , JStr(RichEval(w, "__todo.bodyHTML(" bx ")")))
+    RichSay("源码成为 body_md 的正本"
+        , InStr(TodoStore.Get(mdid).body_md, "- 甲") > 0
+        , TodoStore.Get(mdid).body_md)
+    RichSay("面板已关闭", JStr(RichEval(w, "__todo.mdOpen()")) = "0")
+
+    ; ---- 12. 删除 --------------------------------------------------------
+    victim := TodoStore.Items(w.id)[2].id
+    TodoStore.Delete(victim)
+    w.PushItems()
+    Sleep 250
+    RichSay("删事项后页面少一张卡片", JStr(RichEval(w, "__todo.count()")) = "1"
+        , JStr(RichEval(w, "__todo.count()")))
+    RichSay("删事项后库里也只剩一条", TodoStore.Count(w.id) = 1, TodoStore.Count(w.id))
+
+    ; ---- 13. 收尾 --------------------------------------------------------
+    delID := w.id
+    App.Store.Delete(delID)
+    RichSay("删待办便签连带清事项", TodoStore.Count(delID) = 0, TodoStore.Count(delID))
+    if NoteWindow.All.Has(delID) {
+        try NoteWindow.All[delID].Destroy()
+    }
+
+    App.Log("SELFTEST TODO 结论：" (RICH_FAIL = 0 ? "通过" : "未通过")
+        . "（PASS " RICH_PASS " / FAIL " RICH_FAIL "）")
+}
+
+; 自检小工具：seq 必须严格递增（排序的全部依据就是它）
+IsAscTodo(items) {
+    prev := -1
+    for it in items {
+        if (it.seq <= prev)
+            return false
+        prev := it.seq
+    }
+    return true
 }
 
 NoteOnExit(reason, code) {

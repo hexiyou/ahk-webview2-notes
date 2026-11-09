@@ -8,17 +8,22 @@
 ;    · 所有时间戳都是 Unix 秒（UTC），只在展示层转本地时间。
 ;
 ;  表结构要点：
+;    kind       note（普通便签）| todo（待办便签），决定用哪个页面与哪套菜单
 ;    body_html  富文本模式的正文字面（contenteditable 的 innerHTML）
 ;    body_text  纯文本副本，只用于搜索与列表摘要，不参与编辑
 ;    body_md    Markdown 源码（md 模式为正本；rich 模式是 html 转出的近似值）
 ;    mode       rich | md，决定打开时用哪个编辑器
 ;    hidden     0/1：仅"不在桌面显示"。列表与托盘仍能看到、能打开
 ;
+;  ★ kind='todo' 的行，body_* 三列是 todos 表的**派生摘要**（见 TodoStore._Refresh），
+;    不是用户正文。凡是想直接写正文的路径（SaveBody / 导入）必须先看 kind，
+;    否则写进去的内容会被下一次摘要刷新无声覆盖。
+;
 ;  注意：AHK v2 的续段字符串对缩进极敏感，SQL 一律逐行拼接，不用 "(" 续段。
 ; ============================================================================
 
 class Store {
-    static SCHEMA_VERSION := 3
+    static SCHEMA_VERSION := 4
 
     db := 0
 
@@ -52,11 +57,75 @@ class Store {
         sql .= " title_locked INTEGER NOT NULL DEFAULT 0,"
         sql .= " opacity INTEGER NOT NULL DEFAULT 100,"
         sql .= " hotkey TEXT NOT NULL DEFAULT '',"
+        sql .= " kind TEXT NOT NULL DEFAULT 'note',"
         sql .= " created_at INTEGER NOT NULL DEFAULT 0,"
         sql .= " updated_at INTEGER NOT NULL DEFAULT 0);"
         sql .= "CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);"
         sql .= "CREATE INDEX IF NOT EXISTS idx_notes_hidden ON notes(hidden);"
+        /* ★ idx_notes_kind 不在这里建：老库的 notes 还没有 kind 列，
+           在这儿建索引会 no such column（自检抓到过）。补列之后再建。 */
+        /* ---- v4：待办（事项 / 提醒规则 / 触发记账） -----------------------
+           新表一律 IF NOT EXISTS 无条件建。理由见下面 _EnsureColumn 那段注释：
+           新建的库版本号已经是 4，`if (cur < 4)` 那段永远不跑，靠它建表等于没建。 */
+        sql .= "CREATE TABLE IF NOT EXISTS todos("
+        sql .= " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        sql .= " note_id INTEGER NOT NULL,"
+        sql .= " seq INTEGER NOT NULL DEFAULT 1000,"
+        sql .= " title TEXT NOT NULL DEFAULT '',"
+        sql .= " title_locked INTEGER NOT NULL DEFAULT 0,"
+        sql .= " body_html TEXT NOT NULL DEFAULT '',"
+        sql .= " body_text TEXT NOT NULL DEFAULT '',"
+        sql .= " body_md TEXT NOT NULL DEFAULT '',"
+        sql .= " status TEXT NOT NULL DEFAULT 'todo',"
+        sql .= " start_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " due_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " done_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " canceled_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " link_note_id INTEGER NOT NULL DEFAULT 0,"
+        sql .= " created_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " updated_at INTEGER NOT NULL DEFAULT 0);"
+        sql .= "CREATE INDEX IF NOT EXISTS idx_todos_note ON todos(note_id, seq);"
+        sql .= "CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_at);"
+        sql .= "CREATE TABLE IF NOT EXISTS todo_reminders("
+        sql .= " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        sql .= " todo_id INTEGER NOT NULL,"
+        sql .= " kind TEXT NOT NULL DEFAULT 'offset',"
+        sql .= " anchor TEXT NOT NULL DEFAULT 'start',"
+        sql .= " offset_min INTEGER NOT NULL DEFAULT 0,"
+        sql .= " at_time TEXT NOT NULL DEFAULT '09:00',"
+        sql .= " days_before INTEGER NOT NULL DEFAULT 1,"
+        sql .= " notify TEXT NOT NULL DEFAULT '',"
+        sql .= " enabled INTEGER NOT NULL DEFAULT 1,"
+        sql .= " next_fire_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " last_fired_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " created_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " updated_at INTEGER NOT NULL DEFAULT 0);"
+        sql .= "CREATE INDEX IF NOT EXISTS idx_rem_next ON todo_reminders(enabled, next_fire_at);"
+        sql .= "CREATE INDEX IF NOT EXISTS idx_rem_todo ON todo_reminders(todo_id);"
+        sql .= "CREATE TABLE IF NOT EXISTS todo_fires("
+        sql .= " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        sql .= " todo_id INTEGER NOT NULL,"
+        sql .= " reminder_id INTEGER NOT NULL,"
+        sql .= " fire_at INTEGER NOT NULL,"
+        sql .= " state TEXT NOT NULL DEFAULT 'sending',"
+        sql .= " detail TEXT NOT NULL DEFAULT '',"
+        sql .= " started_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " finished_at INTEGER NOT NULL DEFAULT 0,"
+        sql .= " UNIQUE(todo_id, reminder_id, fire_at));"
+        sql .= "CREATE INDEX IF NOT EXISTS idx_fires_todo ON todo_fires(todo_id, fire_at DESC);"
         this.db.Exec(sql)
+
+        /* 版本号只说明"迁移跑过"，不说明"列真在"。踩过一次：上一版把
+           title_locked 只加在迁移分支里，忘了写进 CREATE TABLE，结果新建的库
+           版本号直接就是 2、迁移永远不跑，读行时 m["title_locked"] 抛
+           "Item has no value"。所以这里不看版本，按 PRAGMA 实测补一次 ——
+           而且必须放在建 idx_notes_kind **之前**：老库的 notes 还没有 kind 列，
+           先建索引就是 no such column（自检当场抓到）。 */
+        this._EnsureColumn("notes", "title_locked", "INTEGER NOT NULL DEFAULT 0")
+        this._EnsureColumn("notes", "opacity", "INTEGER NOT NULL DEFAULT 100")
+        this._EnsureColumn("notes", "hotkey", "TEXT NOT NULL DEFAULT ''")
+        this._EnsureColumn("notes", "kind", "TEXT NOT NULL DEFAULT 'note'")
+        this.db.Exec("CREATE INDEX IF NOT EXISTS idx_notes_kind ON notes(kind)")
 
         cur := this.db.Scalar("SELECT v FROM meta WHERE k='schema_version'")
         if (cur = "") {
@@ -77,13 +146,11 @@ class Store {
             this._EnsureColumn("notes", "hotkey", "TEXT NOT NULL DEFAULT ''")
             this.db.Run("UPDATE meta SET v=? WHERE k='schema_version'", "3")
         }
-        /* 版本号只说明"迁移跑过"，不说明"列真在"。踩过一次：上一版把
-           title_locked 只加在迁移分支里，忘了写进 CREATE TABLE，结果新建的库
-           版本号直接就是 2、迁移永远不跑，读行时 m["title_locked"] 抛
-           "Item has no value"。所以这里不看版本，按 PRAGMA 实测补一次。 */
-        this._EnsureColumn("notes", "title_locked", "INTEGER NOT NULL DEFAULT 0")
-        this._EnsureColumn("notes", "opacity", "INTEGER NOT NULL DEFAULT 100")
-        this._EnsureColumn("notes", "hotkey", "TEXT NOT NULL DEFAULT ''")
+        /* v3 -> v4：便签类型。老行一律 'note'，走原来的页面与菜单，行为零变化；
+           新建库的 CREATE TABLE 里已经带了这一列，这里只是给老库补。
+           列本身在上面已经按 PRAGMA 补过了，这里只更新版本号。 */
+        if (cur < 4)
+            this.db.Run("UPDATE meta SET v=? WHERE k='schema_version'", "4")
     }
 
     /* 列存在就跳过，不存在就 ALTER。注意 SQLite 的 ALTER TABLE ADD COLUMN
@@ -115,8 +182,9 @@ class Store {
 
        sort    default（置顶优先、新建在前）| title | created | updated
        desc    1 = 倒序（只对 title/created/updated 有意义，default 是固定的）
-       filter  Map，键 hotkey / pinned / shown / image / code 取 0 或 1，
-               缺键 = 不限。1 表示"有快捷键 / 已置顶 / 已展开 / 含图片 / 含代码块"。
+       filter  Map，键 hotkey / pinned / shown / image / code / kind 取 0 或 1，
+               缺键 = 不限。1 表示"有快捷键 / 已置顶 / 已展开 / 含图片 / 含代码块 /
+               是待办便签"，0 表示前半句的反面（kind 的 0 = 普通便签）。
                多个条件是 AND：勾了"已置顶"又勾"含图片"，就是既置顶又有图。
 
        为什么过滤也放 SQL：图片/代码块要看正文内容（body_html），而列表页拿不到
@@ -158,6 +226,7 @@ class Store {
             "hotkey", ["hotkey<>''", "hotkey=''"],
             "pinned", ["pinned=1", "pinned=0"],
             "shown",  ["hidden=0", "hidden=1"],
+            "kind",   ["kind='todo'", "kind='note'"],
             "image",  ["body_html LIKE '%<img%'", "body_html NOT LIKE '%<img%'"],
             "code",   ["(body_html LIKE '%<pre%' OR body_md LIKE '%" bt3 "%')"
                      , "(body_html NOT LIKE '%<pre%' AND body_md NOT LIKE '%" bt3 "%')"])
@@ -213,17 +282,25 @@ class Store {
     ; ---- 写 -----------------------------------------------------------------
 
     ; opts 是 Map（也兼容对象），没给的字段取默认值。返回新 id
+    /* kind='todo' 时不写正文：那三列是摘要，由 TodoStore._Refresh 算。
+       这里传进来的 body_* 对待办便签一律无效（传了也不写），避免"创建时塞了
+       一段文字、下一秒被摘要刷掉"这种看得见但说不清的怪事。 */
     Create(opts := {}) {
         now := Store.Now()
-        sql := "INSERT INTO notes(title, body_html, body_text, body_md, mode, color,"
+        kind := Store._get(opts, "kind", "note")
+        if (kind != "todo")
+            kind := "note"
+        isTodo := (kind = "todo")
+        sql := "INSERT INTO notes(kind, title, body_html, body_text, body_md, mode, color,"
         sql .= " x, y, w, h, pinned, hidden, created_at, updated_at)"
-        sql .= " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        sql .= " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         r := this.db.Run(sql
+            , kind
             , Store._get(opts, "title", "")
-            , Store._get(opts, "body_html", "")
-            , Store._get(opts, "body_text", "")
-            , Store._get(opts, "body_md", "")
-            , Store._get(opts, "mode", "rich")
+            , isTodo ? "" : Store._get(opts, "body_html", "")
+            , isTodo ? "" : Store._get(opts, "body_text", "")
+            , isTodo ? "" : Store._get(opts, "body_md", "")
+            , isTodo ? "rich" : Store._get(opts, "mode", "rich")
             , Store._get(opts, "color", "yellow")
             , Store._get(opts, "x", 0)
             , Store._get(opts, "y", 0)
@@ -235,13 +312,24 @@ class Store {
         return r.lastId
     }
 
+    ; 这张便签是什么类型（'note' / 'todo'）。查不到行时返回 ""，由调用方决定
+    KindOf(id) {
+        return this.db.Scalar("SELECT kind FROM notes WHERE id=?", id)
+    }
+
     /* 正文保存：一次写齐四种表示，updated_at 自动更新。
        title 用 CASE 保护：用户手动改过标题（title_locked=1）以后，正文第一行
-       再怎么变都不许盖掉它 —— 否则"重命名"这个功能等于没做。 */
+       再怎么变都不许盖掉它 —— 否则"重命名"这个功能等于没做。
+
+       返回 1 = 写了；0 = 拒写（kind='todo'）。待办便签的正文在 todos 表里，
+       notes 这三列只是摘要缓存，从这条路写进去会被下一次摘要刷新无声覆盖。 */
     SaveBody(id, title, html, text, md, mode) {
+        if (this.KindOf(id) = "todo")
+            return 0
         sql := "UPDATE notes SET title=CASE WHEN title_locked=1 THEN title ELSE ? END,"
         sql .= " body_html=?, body_text=?, body_md=?, mode=?, updated_at=? WHERE id=?"
         this.db.Run(sql, title, html, text, md, mode, Store.Now(), id)
+        return 1
     }
 
     ; 用户指定标题：写进去并上锁
@@ -312,8 +400,21 @@ class Store {
         this.db.Run("UPDATE notes SET updated_at=? WHERE id=?", Store.Now(), id)
     }
 
+    /* 删便签。两种类型都要收尾：
+         · 待办便签 —— 它的事项与提醒规则一起删（todo_fires 历史留着，
+           事后能查"那天到底发没发"）；不做级联是因为"删一张便签顺手删一堆
+           事项"正是用户最不想的意外，所以只删它自己名下的。
+         · 被别的待办事项关联的普通便签 —— 把指向它的 link_note_id 清 0，
+           事项保留、界面上打「关联已失效」，不连带删事项。 */
     Delete(id) {
-        this.db.Run("DELETE FROM notes WHERE id=?", id)
+        nid := Integer(id)
+        if (this.KindOf(nid) = "todo") {
+            this.db.Exec("DELETE FROM todo_reminders WHERE todo_id IN"
+                . " (SELECT id FROM todos WHERE note_id=" nid ")")
+            this.db.Exec("DELETE FROM todos WHERE note_id=" nid)
+        }
+        this.db.Run("UPDATE todos SET link_note_id=0 WHERE link_note_id=?", nid)
+        this.db.Run("DELETE FROM notes WHERE id=?", nid)
     }
 
     Close() {
@@ -325,6 +426,8 @@ class Store {
     _Row(m) {
         return {
             id: m["id"],
+            ; v4 之前没有这一列；Has 兜一下，否则升级瞬间整个列表读不出来
+            kind: (m.Has("kind") && m["kind"] != "") ? m["kind"] : "note",
             title: m["title"],
             body_html: m["body_html"],
             body_text: m["body_text"],

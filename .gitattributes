@@ -1,0 +1,4 @@
+# 本机 core.autocrlf=true：文本文件进库统一存 LF，检出时按平台还原。
+# 但 shell 脚本必须保住 LF —— 一旦被检出成 CRLF，shebang 变成
+# "#!/usr/bin/env bash\r"，git bash 会直接报 bad interpreter。
+*.sh text eol=lf

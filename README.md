@@ -60,6 +60,7 @@ runtime\AutoHotkey64.exe note.ahk
 | 每张便签的透明度 | 便签右键「透明度」可单独设 30%~100%（存库里，跟这一张走）；列表右键有「重置透明度（100%）」兜底 |
 | 便签快捷键 | 最多 10 张便签各挂一个全局热键，一键呼到最前（再按收起），列表里带角标；没有设的便签行为不变 |
 | 六种颜色 | 黄 / 粉 / 蓝 / 绿 / 紫 / 灰，随时切换，颜色存在库里 |
+| **待办便签** | **一种新的便签类型：一张便签里装一列事项，每件事有自己的标题、正文、状态、计划/截止时间和顺序** —— 跟普通便签同一个窗口、同一套外观，列表里靠徽标和「3/7」进度区分。详见下面的[待办便签](#待办便签) |
 | 富文本 | 加粗、斜体、删除线、标题、列表、待办勾选、行内代码、引用、链接、代码块、分割线 |
 | 代码着色 | 代码块自动上色（本地 highlight.js，离线可用）；右键「代码语言」可手动指定，语言跟着块走 —— 可视化 ⇄ Markdown 源码来回切、反复重画都不丢；导出 HTML 也带着颜色 |
 | **代码一键复制** | 鼠标移到代码块上，右上角浮出「复制」按钮，点一下整段代码进剪贴板（换行是 CRLF，粘进记事本也是一行一行）；右键菜单里也有「复制这段代码」，按钮被滚走时用它 |
@@ -83,6 +84,34 @@ runtime\AutoHotkey64.exe note.ahk
 | 右键菜单 | 便签和列表都支持，用的是系统原生菜单（能超出小窗口边界） |
 | 托盘常驻 | 全局热键随时新建/呼出，关掉便签窗口不退出进程 |
 | **外部调用** | **别的程序发一条窗口消息就能新建便签（纯文本或 JSON），还能拿回新便签的 id** —— 不起 HTTP、不装插件。见 [docs/ipc.md](docs/ipc.md) |
+
+### 待办便签
+
+一种新的便签类型（`kind = 'todo'`）。窗口、外观、置顶、透明度、颜色、快捷键全都和普通便签共用，
+只是正文区从"一大块富文本"换成"一列事项卡片"。新建入口有三处：托盘菜单、列表空白处右键、待办便签自己的右键菜单。
+
+| 操作 | 说明 |
+|---|---|
+| `+ 新事项` / `Ctrl+Enter` | 在末尾追加一条，光标直接落到标题上 |
+| 点勾选框 | 未完成 ⇄ 已完成（已完成再点一次回到未完成；「已取消」只在状态菜单里） |
+| `Ctrl+Shift+D` | 同上，不用摸鼠标 |
+| 点状态胶囊 | 弹出状态子菜单：未开始 / 进行中 / 已完成 / 已取消 |
+| 点时间胶囊 | 行内弹出「计划开始 / 预计完成」两个时间框，**精确到秒**；逾期会标红并写「逾期 2 小时」这样的相对时长 |
+| 拖左边把手 | 调整顺序（只有按住把手才能拖，否则会吃掉正文里的选字） |
+| `Alt+↑` / `Alt+↓` | 同上，事项多或窗口很窄时更好用 |
+| `⋮` / 事项内右键 | 全量菜单：Markdown 源码、状态、计划/截止时间、关联便签、上移/下移、删除事项；光标落在代码块里时还会多出「复制这段代码」和「代码语言」 |
+| `↗` | 跳到这条事项关联的便签；没关联过就直接进"选便签"；关联的便签被删了按钮会变灰，点它是重新选一张 |
+| 事项正文 | 每条事项都是独立的富文本编辑器，支持加粗/列表/代码块/插入图片，跟普通便签的编辑体验完全一致 |
+| `Ctrl+S` | 立刻落库（平时是停手 400ms 自动保存，`Ctrl+S` 只是"我现在就要存"） |
+| 事项菜单 →「Markdown 源码…」 | 只对**单条事项**编辑源码，不是整页 —— 一页十几个块同时变源码没有使用场景，还会让 `Ctrl+M` 的语义变含糊，所以待办页**不注册**整页 md 模式，`Ctrl+M` 在这里没有绑定 |
+
+三个阶段标志（**逾期 / 即将到期 / 进行中（自动）**）都是显示时现算的，不落库：改成"存进库"就得处理
+"电脑关机三天再开机，库里那批逾期状态怎么补算"的问题，不划算。
+
+> 便签正文区显示的是 `todos` 表的**只读派生摘要**（`- [ ] 标题` 清单）。数据层直接拦住了
+> 对 `kind='todo'` 便签的 `SaveBody`（返回 0），所以不会出现"两边各写一份、谁也不服谁"。
+>
+> 提醒引擎（到点弹窗/系统通知）、导入导出还没做，属于后续阶段。设计见 [docs/todo-design.md](docs/todo-design.md)。
 
 ### 快捷键
 
@@ -411,6 +440,7 @@ wv2-notes/
 ├─ lib/
 │  ├─ sqlite.ahk         SQLite 封装（优先用系统 winsqlite3.dll）
 │  ├─ store.ahk          数据访问层（表结构、CRUD、搜索、排序 + 过滤）
+│  ├─ todo-store.ahk     ★ 待办事项数据层（todos / todo_reminders / todo_fires，含 seq 排序与派生摘要）
 │  ├─ note-window.ahk    一张便签 = 一个 Gui + 一个 WebView2（含两套右键菜单）
 │  ├─ list-window.ahk    列表面板（单例；含排序/过滤/多选批量的宿主侧）
 │  ├─ settings-window.ahk 设置面板（单例 WebView2，ui\settings.*）
@@ -425,6 +455,8 @@ wv2-notes/
 │  └─ WebView2Loader.dll
 ├─ ui/
 │  ├─ note.html/css/js   便签页面
+│  ├─ editor-core.js     ★ 编辑器内核（代码块/光标/图片/插入），便签页与待办页共用
+│  ├─ todo.html/css/js   ★ 待办页面（事项卡片、时间弹层、单事项 Markdown 源码）
 │  ├─ list.html/css/js   列表页面
 │  ├─ settings.html/css/js 设置面板页面
 │  ├─ md.js              Markdown ⇄ HTML（纯函数，可单测）
@@ -433,11 +465,14 @@ wv2-notes/
 ├─ assets/note.ico       图标
 ├─ runtime/              自带的 AutoHotkey 运行时
 ├─ tools/                冒烟测试、端到端测试、图标生成
+│  ├─ _run-st.sh         ★ 自检批跑器：一条命令跑一组 --selftest-*，只打结论行
+│  ├─ probe-todo.ahk     ★ 待办数据层探针（不需要 WebView2，含 v3 老库升级用例）
 │  ├─ ipc-send.ahk       ★ 外部调用示例（AHK，独立可拷走）
 │  └─ ipc-send.py        ★ 外部调用示例（Python，含回执）
 ├─ tests/md.test.js      Markdown 单测
 └─ docs/
-   └─ ipc.md             ★ 外部调用协议文档
+   ├─ ipc.md             ★ 外部调用协议文档
+   └─ todo-design.md     ★ 待办便签设计方案（分四期，当前已完成 P1）
 ```
 
 ---
@@ -445,6 +480,12 @@ wv2-notes/
 ## 开发与测试
 
 ```bash
+# 全量回归（推荐姿势）：一条命令跑一组自检，只打结论行，挂了才把失败明细贴出来。
+# DATA 固定落在 data\_st，绝不碰你自己的库。
+bash tools/_run-st.sh rich edit codelang codecopy note import \
+                        export image batch settings pdf docx \
+                        list del font hotkey opacity showall todo
+
 # Markdown 渲染 / 纯文本提取 / 标题提取
 node tests/md.test.js
 
@@ -465,8 +506,12 @@ runtime\AutoHotkey64.exe tools\probe-newbug.ahk
 
 # 菜单：回调参数个数、闭包、菜单项是否都包了包装器、三套右键菜单的两端是否对得上、
 #       代码复制按钮的接线 + Clip.SetText 的 CRLF 转换 +
-#       导入/排序/过滤/批量/PDF/Word 的两端接线（212 项断言，很快）
+#       导入/排序/过滤/批量/PDF/Word 的两端接线（213 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-menu.ahk
+
+# 待办数据层：建表/迁移、事项 CRUD、seq 排序与重编号、派生摘要、关联失效、
+#              v3 老库升级（52 项断言，很快，不需要 WebView2）
+runtime\AutoHotkey64.exe tools\probe-todo.ahk
 
 # JSON 取值：大字段（1.6MB / 4MB）不许崩、转义引号 / 同名键 / 缩进边界 / 键存在性（35 项断言，很快）
 runtime\AutoHotkey64.exe tools\probe-json.ahk
@@ -543,6 +588,12 @@ runtime\AutoHotkey64.exe note.ahk --selftest-pdf
 #              两张批量；本机没装 Office 时第一条就报"没有 Word"并整体判未通过，
 #              不会崩、也不会卡住等超时，6 项断言，约 20 秒）
 runtime\AutoHotkey64.exe note.ahk --selftest-docx
+
+# 程序级自检：待办便签 —— 老库(v3)升级不丢数据 → 建窗 → 事项增删改 → 勾选/逾期 →
+#              排序 → 关联便签 → 筛选 → 时间弹层 → 单事项 Markdown 源码 → 删除
+#              （53 项断言，约 8 秒）。它会真的建一张待办便签再删掉，还会写一个 v3 老库样本，
+#              所以务必配独立 --data-dir，别拿日常库跑
+runtime\AutoHotkey64.exe note.ahk --data-dir data\_st --selftest-todo
 
 # 程序级自检：设置面板（开窗 + 读值 + 颜色色块 + 拖大窗口重铺 +
 #              保存生效 + 非法热键拦截）

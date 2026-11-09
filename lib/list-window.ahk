@@ -9,6 +9,10 @@
 ;
 ;  搜索不在前端过滤，而是回主程序走 SQL LIKE —— 能搜到正文深处，中文也不用分词。
 ; ============================================================================
+;  待办便签的进度要在列表里显示（「3/7 · 2 条逾期」），所以这里带上待办数据层。
+;  probe 脚本单独 include 本文件时 TodoStore.S 是 0，进度一行自动跳过 ——
+;  列表窗口必须能脱离主程序跑测试。
+#Include todo-store.ahk
 
 class ListWindow {
     static Store := 0
@@ -199,6 +203,7 @@ class ListWindow {
     ; 过滤条件的定义（顺序即菜单顺序）。Map 的遍历是哈希序，菜单会乱，所以用数组。
     static FilterDefs() {
         return [
+            { key: "kind",   title: "类型",     yes: "待办便签",     no: "普通便签" },
             { key: "hotkey", title: "快捷键",   yes: "已分配快捷键", no: "未分配快捷键" },
             { key: "pinned", title: "置顶",     yes: "已置顶",       no: "未置顶" },
             { key: "shown",  title: "显示状态", yes: "已展开（显示）", no: "已收起" },
@@ -539,6 +544,7 @@ class ListWindow {
         }
         m := Menu()
         m.Add("新建便签", ListWindow.Cb(ListMenuNew()))
+        m.Add("新建待办便签", ListWindow.Cb(ListMenuNewTodo()))
         m.Add("刷新列表", ListWindow.Cb(ListMenuRefresh()))
         m.Add()
         m.Add("全部显示", ListWindow.Cb(ListMenuShowAll()))
@@ -608,6 +614,7 @@ class ListWindow {
             if (i > 1)
                 json .= ","
             json .= '{"id":' n.id
+            json .= ',"kind":' JsonQuote(n.kind)
             json .= ',"title":' JsonQuote(n.title)
             json .= ',"excerpt":' JsonQuote(ListWindow.Excerpt(n.body_text, 60))
             json .= ',"color":' JsonQuote(n.color)
@@ -618,6 +625,14 @@ class ListWindow {
             json .= ',"hk":' JsonQuote(n.hotkey = "" ? "" : NoteWindow.HotkeyPretty(n.hotkey))
             json .= ',"hasImage":' (InStr(n.body_html, "<img") ? 1 : 0)
             json .= ',"hasCode":' (InStr(n.body_html, "<pre") ? 1 : 0)
+            /* 待办便签多带一份进度：列表里要显示「3/7 · 2 条逾期」。
+               TodoStore 没接上（列表窗口单独跑探针）时就不带，页面自然退回摘要。 */
+            if (n.kind = "todo" && TodoStore.S) {
+                ts := TodoStore.Summary(n.id)
+                json .= ',"tTotal":' ts.total
+                json .= ',"tDone":' ts.done
+                json .= ',"tOverdue":' ts.overdue
+            }
             json .= ',"created":' n.created_at
             json .= ',"updated":' n.updated_at
             json .= "}"
@@ -662,6 +677,10 @@ ListTick(raw, type) {
 
 ListMenuOpen(id) {
     return () => ListWindow.Call("onOpen", id)
+}
+
+ListMenuNewTodo() {
+    return () => ListWindow.Call("onNewTodo")
 }
 
 ListMenuExport(id, fmt) {

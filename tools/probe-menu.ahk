@@ -210,6 +210,11 @@ Check("ShowAll 不再用 Store.Visible()（会导致收起后再也点不出来�
 
 noteJs := FileRead(A_ScriptDir "\..\ui\note.js", "UTF-8")
 listJs := FileRead(A_ScriptDir "\..\ui\list.js", "UTF-8")
+/* 编辑逻辑里跟正文结构有关的那部分已经抽到 editor-core.js（note.js 只留转调），
+   扫源码时得把这一份也算进来，否则断言会因为"代码搬了家"而假失败。 */
+coreJs := FileRead(A_ScriptDir "\..\ui\editor-core.js", "UTF-8")
+todoJs := FileRead(A_ScriptDir "\..\ui\todo.js", "UTF-8")
+noteAll := noteJs "`n" coreJs
 Check("便签页有 contextmenu → menu", InStr(noteJs, "contextmenu") > 0 && InStr(noteJs, "type: 'menu'") > 0)
 
 ; ---------------------------------------------------------------------------
@@ -262,8 +267,12 @@ while RegExMatch(srcWin, 'ObjBindMethod\(this, "Cmd", "([a-z-]+)"', &m, pos) {
 }
 Check("宿主发得出至少 8 条编辑命令", cmds.Count >= 8, "共 " cmds.Count " 条")
 for name, _ in cmds {
-    has := RegExMatch(noteJs, "case '" name "':") > 0
-    Check("页面能接住 cmd：" name, has, has ? "" : "runCmd 里缺 case")
+    /* 宿主一套 Cmd() 服务两种页面：todo-* 只会在待办页出现，其余是便签页的。
+       分开查才叫"跨文件对得上"；不分青红皂白地两边都算通过，等于没测。 */
+    target := (SubStr(name, 1, 5) = "todo-") ? todoJs : noteJs
+    page := (SubStr(name, 1, 5) = "todo-") ? "todo.js" : "note.js"
+    has := RegExMatch(target, "case '" name "':") > 0
+    Check("页面能接住 cmd：" name, has, has ? "" : page " 的 runCmd 里缺 case")
 }
 
 ; 反过来：页面认识的命令，宿主菜单里也得有入口（save 还有 Ctrl+S，不必在菜单里）
@@ -448,7 +457,7 @@ for m in ["SaveMany", "UniquePath", "WriteTo"]
 Check("页面接得住 import 消息", InStr(noteJs, "case 'import'") > 0)
 Check("页面导入分覆盖/追加", InStr(noteJs, "mode === 'replace'") > 0)
 Check("TXT 导入走 textContent（不当 HTML 解析）"
-    , InStr(noteJs, "d.textContent = line") > 0)
+    , InStr(noteAll, "d.textContent = line") > 0)
 Check("Markdown 导入走 MD.render", InStr(noteJs, "isMd ? MD.render(text)") > 0)
 Check("追加前会削掉末尾空块", InStr(noteJs, "trimTrailingBlank(editor)") > 0)
 

@@ -29,6 +29,10 @@ class NoteWindow {
 
     id := 0
     note := 0
+    /* 'note'（普通便签）/ 'todo'（待办便签）。决定装哪个页面、菜单怎么分叉。
+       建窗时按库里的 kind 定，之后不再改 —— 换类型等于换一种数据模型，
+       正确做法是新建一张，不是原地变身。 */
+    kind := "note"
     gui := 0
     wvc := 0
     wv := 0
@@ -47,6 +51,9 @@ class NoteWindow {
     menuZone := "note"
     menuInPre := 0
     menuLang := ""
+    /* 待办便签：右键/⋮ 落在哪个事项上，以及那次菜单是哪种（status/link/item） */
+    menuItem := 0
+    menuKind := ""
     /* 图片菜单要操作的那张图（页面给的是 img 的原始 src，file:/// 或 data: ）。
        右键大图预览和右键正文里的缩略图都会填它。 */
     menuImage := ""
@@ -58,6 +65,7 @@ class NoteWindow {
     __New(note) {
         this.id := note.id
         this.note := note
+        this.kind := (note.kind = "todo") ? "todo" : "note"
         ctx := NoteWindow.Ctx
         appr := ctx.appearance
 
@@ -131,7 +139,9 @@ class NoteWindow {
         this.wv.add_ProcessFailed(ObjBindMethod(this, "OnProcessFailed"))
         this.wv.add_NavigationStarting(ObjBindMethod(this, "OnNavStarting"))
 
-        this.wv.Navigate(NoteWindow.FileUrl(ctx.uiDir "\note.html") "?id=" note.id)
+        ; 页面按类型选：普通便签是整页一个编辑器，待办便签是一页多个事项块
+        page := (this.kind = "todo") ? "todo.html" : "note.html"
+        this.wv.Navigate(NoteWindow.FileUrl(ctx.uiDir "\" page) "?id=" note.id)
 
         NoteWindow.All[note.id] := this
         SetTimer(ObjBindMethod(this, "Refill"), -150)
@@ -201,6 +211,34 @@ class NoteWindow {
                     this.PushInit()
                 case "save":
                     this.DoSave(raw)
+                /* ---- 待办便签 -------------------------------------------------
+                   结构变化（增删/改状态/改时间/排序/关联）一律：改库 → PushItems。
+                   正文保存是例外 —— 回推整表会重建正文节点，光标就没了。 */
+                case "todo-add":
+                    this.DoItemAdd()
+                case "todo-save":
+                    this.DoSaveItem(raw)
+                case "todo-save-md":
+                    this.DoSaveItemMd(raw)
+                case "todo-title":
+                    this.DoItemTitle(raw)
+                case "todo-status":
+                    this.DoItemStatus(raw)
+                case "todo-times":
+                    this.DoItemTimes(raw)
+                case "todo-move":
+                    this.DoItemMove(raw)
+                case "todo-del":
+                    this.menuItem := JsonNum(raw, "id")
+                    SetTimer(ObjBindMethod(this, "ConfirmDeleteItem"), -10)
+                case "todo-menu":
+                    this.menuItem := JsonNum(raw, "id")
+                    this.menuKind := JsonStr(raw, "kind")
+                    this.menuInPre := JsonNum(raw, "inpre")
+                    this.menuLang := JsonStr(raw, "lang")
+                    SetTimer(ObjBindMethod(this, "ShowTodoItemMenu"), -10)
+                case "open-note":
+                    App.OpenNote(JsonNum(raw, "id"))
                 case "pin":
                     this.DoPin(JsonBool(raw, "on"))
                 case "color":
@@ -282,6 +320,7 @@ class NoteWindow {
         json := '{"type":"init"'
         json .= ',"note":{'
         json .= '"id":' n.id
+        json .= ',"kind":' JsonQuote(this.kind)
         json .= ',"title":' JsonQuote(n.title)
         json .= ',"html":' JsonQuote(n.body_html)
         json .= ',"text":' JsonQuote(n.body_text)
@@ -296,8 +335,47 @@ class NoteWindow {
         json .= ',"fontSize":' appr.fontSize
         json .= ',"drag":"' appr.drag '"'
         json .= '}'
+        /* 待办便签把事项一并带上，省得页面再问一次（也避免"页面先画一张空表、
+           再被填满"的闪烁）。 */
+        if (this.kind = "todo")
+            json .= ',"items":' NoteWindow.ItemsJson(this.id)
         json .= '}'
         this.Send(json)
+    }
+
+    /* 事项列表 → JSON 数组。页面拿到的是"事实"，不需要自己再算状态：
+       逾期/即将到期这类派生标志按 doc 的约定在页面现算（它才有 now 和时区）。 */
+    static ItemsJson(noteID) {
+        out := "["
+        i := 0
+        for it in TodoStore.Items(noteID) {
+            if (i > 0)
+                out .= ","
+            i += 1
+            out .= '{"id":' it.id
+            out .= ',"title":' JsonQuote(it.title)
+            out .= ',"body_html":' JsonQuote(it.body_html)
+            out .= ',"body_md":' JsonQuote(it.body_md)
+            out .= ',"body_text":' JsonQuote(it.body_text)
+            out .= ',"status":' JsonQuote(it.status)
+            out .= ',"start_at":' it.start_at
+            out .= ',"due_at":' it.due_at
+            out .= ',"done_at":' it.done_at
+            out .= ',"canceled_at":' it.canceled_at
+            out .= ',"link_note_id":' it.link_note_id
+            out .= ',"link_title":' JsonQuote(it.link_title)
+            out .= ',"link_ok":' it.link_ok
+            out .= ',"seq":' it.seq
+            out .= "}"
+        }
+        return out "]"
+    }
+
+    ; 结构变化（增删/排序/状态/时间/关联）之后整表推回去，页面按 id 复用 DOM
+    PushItems() {
+        if (this.kind != "todo")
+            return
+        this.Send('{"type":"items","items":' NoteWindow.ItemsJson(this.id) "}")
     }
 
     DoSave(raw) {
@@ -306,7 +384,12 @@ class NoteWindow {
         text := JsonStr(raw, "text")
         md := JsonStr(raw, "md")
         mode := JsonStr(raw, "mode", "rich")
-        NoteWindow.Store.SaveBody(this.id, title, html, text, md, mode)
+        /* 待办便签的正文在 todos 表里，notes.body_* 只是摘要。这条路要是放过去，
+           摘要会被用户正文覆盖（下一次刷新又变回去），表现就是"内容自己消失了"。 */
+        if (!NoteWindow.Store.SaveBody(this.id, title, html, text, md, mode)) {
+            App.Log("拒绝写正文：便签 " this.id " 是待办便签（正文属于 todos 表）")
+            return
+        }
         ; 内存里的副本同步更新，免得关闭时用旧值回写
         this.note.title := title
         this.note.body_html := html
@@ -316,6 +399,89 @@ class NoteWindow {
         /* 回执。Ctrl+S 那一条页面要弹"✓ 已保存 hh:mm:ss"，所以得把 manual 带回去 ——
            用户按了保存键却看不到任何反馈，就会怀疑自己是不是没保存上。 */
         this.Send('{"type":"saved","manual":' (JsonNum(raw, "manual") ? 1 : 0) '}')
+    }
+
+    ; ---- 待办便签：事项的增删改 ------------------------------------------
+
+    DoItemAdd() {
+        if (this.kind != "todo")
+            return
+        if (TodoStore.Count(this.id) >= TodoStore.SOFT_MAX) {
+            App.Toast("这一页事项太多了（上限 " TodoStore.SOFT_MAX " 条），建议拆成两张待办便签")
+            return
+        }
+        TodoStore.Add(this.id)
+        this.PushItems()
+    }
+
+    /* 正文保存。**不回推 items** —— 一推就会按 id 重排 DOM，正在打字的那个
+       正文节点被重建，光标和滚动位置全丢。只回一条回执。 */
+    DoSaveItem(raw) {
+        id := JsonNum(raw, "id")
+        if !TodoStore.Get(id)
+            return
+        TodoStore.Save(id, JsonStr(raw, "title"), JsonStr(raw, "html")
+            , JsonStr(raw, "text"), JsonStr(raw, "md"))
+        it := TodoStore.Get(id)
+        this.Send('{"type":"saved","id":' id
+            . ',"title":' JsonQuote(it ? it.title : "")
+            . ',"manual":' (JsonNum(raw, "manual") ? 1 : 0) '}')
+    }
+
+    /* 单事项 Markdown 源码应用：md 是正本，html 由页面用 MD.render 算好一起发来
+       （宿主里没有 Markdown 渲染器，也不该为了这件事再引一份）。 */
+    DoSaveItemMd(raw) {
+        id := JsonNum(raw, "id")
+        if !TodoStore.Get(id)
+            return
+        html := JsonStr(raw, "html")
+        TodoStore.Save(id, JsonStr(raw, "title"), html, JsonStr(raw, "text")
+            , JsonStr(raw, "md"))
+        this.Send('{"type":"item-body","id":' id ',"html":' JsonQuote(html) "}")
+    }
+
+    DoItemTitle(raw) {
+        id := JsonNum(raw, "id")
+        t := Trim(JsonStr(raw, "title"))
+        if (t = "")
+            TodoStore.ClearTitle(id)
+        else
+            TodoStore.SetTitle(id, t)
+        it := TodoStore.Get(id)
+        this.Send('{"type":"saved","id":' id
+            . ',"title":' JsonQuote(it ? it.title : "") '}')
+    }
+
+    DoItemStatus(raw) {
+        id := JsonNum(raw, "id")
+        TodoStore.SetStatus(id, JsonStr(raw, "status", "todo"))
+        this.PushItems()
+    }
+
+    DoItemTimes(raw) {
+        id := JsonNum(raw, "id")
+        TodoStore.SetTimes(id, JsonNum(raw, "start"), JsonNum(raw, "due"))
+        this.PushItems()
+    }
+
+    DoItemMove(raw) {
+        id := JsonNum(raw, "id")
+        TodoStore.MoveTo(this.id, id, JsonNum(raw, "idx", 1))
+        this.PushItems()
+    }
+
+    ConfirmDeleteItem() {
+        id := this.menuItem
+        it := TodoStore.Get(id)
+        if !it
+            return
+        r := MsgBox("删除这个事项？`n`n「" (it.title = "" ? "（无标题）" : it.title)
+            . "」`n`n它的提醒也会一起删除。删除后无法撤销（要留底可以用导出包）。"
+            , "删除事项", "YesNo Icon? Default2")
+        if (r != "Yes")
+            return
+        TodoStore.Delete(id)
+        this.PushItems()
     }
 
     TogglePin() => this.DoPin(!this.note.pinned)
@@ -568,13 +734,22 @@ class NoteWindow {
              标题栏 / 工具栏 / 底栏 → note  这张便签怎么处理
              正文编辑区            → edit  这段文字怎么编辑
              图片（大图预览 / 正文里的图）→ image  这张图怎么处理
+             待办便签里的某个事项   → todo  这个事项怎么处理
            在正文里右键却弹出"删除这张便签"是最容易误点的组合，所以必须分开。 */
+        if (this.menuZone = "todo") {
+            this.ShowTodoItemMenu()
+            return
+        }
         if (this.menuZone = "image") {
             this.ShowImageMenu()
             return
         }
         if (this.menuZone = "edit") {
             this.ShowEditMenu()
+            return
+        }
+        if (this.kind = "todo") {
+            this.ShowTodoNoteMenu()
             return
         }
         isMd := (this.note.mode = "md")
@@ -651,6 +826,166 @@ class NoteWindow {
         m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
         m.Show()
     }
+
+    /* 待办便签的"这张便签"菜单。和普通便签共用同一套窗口能力（置顶/颜色/
+       透明度/最大化/快捷键），换成待办独有的入口：新事项、新建待办便签。
+       整页 Markdown 与"导入文件"没有，因为正文不在这一层。 */
+    ShowTodoNoteMenu() {
+        m := Menu()
+        m.Add("新事项`tCtrl+Enter", NoteWindow.MB(ObjBindMethod(this, "Cmd", "todo-add")))
+        m.Add("新建待办便签", (*) => App.NewTodoNote())
+        m.Add("便签列表…", (*) => NoteDeferList())
+        m.Add("重命名…", NoteWindow.MB(ObjBindMethod(this, "Rename")))
+        m.Add(this.note.hotkey ? "快捷键…（" NoteWindow.HotkeyPretty(this.note.hotkey) "）"
+            : "设置快捷键…", NoteWindow.MB(ObjBindMethod(this, "AskHotkey")))
+        m.Add()
+        m.Add(this.maximized ? "还原窗口大小`t双击标题栏" : "最大化窗口`t双击标题栏"
+            , NoteWindow.MB(ObjBindMethod(this, "ToggleMax")))
+        m.Add(this.note.pinned ? "取消置顶" : "置顶"
+            , NoteWindow.MB(ObjBindMethod(this, "TogglePin")))
+        sub := Menu()
+        for name in NoteWindow.ColorKeys() {
+            if !NoteWindow.IsColor(name)
+                continue
+            sub.Add(NoteWindow.ColorLabel(name)
+                , NoteWindow.MB(ObjBindMethod(this, "DoColor", name)))
+            if (name = this.note.color)
+                sub.Check(NoteWindow.ColorLabel(name))
+        }
+        m.Add("颜色", sub)
+
+        am := Menu()
+        for pct in NoteWindow.OpacityLevels() {
+            label := (pct = 100) ? "100%（不透明）" : pct "%"
+            am.Add(label, NoteWindow.MB(ObjBindMethod(this, "SetOpacity", pct)))
+            if (pct = this.note.opacity)
+                am.Check(label)
+        }
+        m.Add("透明度", am)
+        m.Add()
+        m.Add("保存`tCtrl+S", NoteWindow.MB(ObjBindMethod(this, "Cmd", "save")))
+        m.Add()
+        m.Add("收起这张", NoteWindow.MB(ObjBindMethod(this, "Hide")))
+        m.Add("删除这张…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDelete")))
+        m.Show()
+    }
+
+    /* 一个事项的菜单。三种入口共用：
+         · 点状态胶囊 → kind=status（只给状态子菜单，少点两下）
+         · 点 ↗ 但还没关联 → kind=link（直接进"选择便签"）
+         · 点 ⋮ / 在事项里右键 → kind=item（全量） */
+    ShowTodoItemMenu() {
+        id := this.menuItem
+        it := TodoStore.Get(id)
+        if !it
+            return
+        kind := this.menuKind
+
+        if (kind = "link") {
+            this.AskLink(id)
+            return
+        }
+
+        pairs := [["todo", "未开始"], ["doing", "进行中"], ["done", "已完成"], ["canceled", "已取消"]]
+        sub := Menu()
+        for p in pairs {
+            sub.Add(p[2], NoteWindow.MB(ObjBindMethod(this, "SetItemStatus", id, p[1])))
+            if (p[1] = it.status)
+                sub.Check(p[2])
+        }
+        if (kind = "status") {
+            sub.Show()
+            return
+        }
+
+        m := Menu()
+        m.Add("Markdown 源码…", NoteWindow.MB(ObjBindMethod(this, "CmdItem", "todo-md", id)))
+        m.Add("状态", sub)
+        m.Add("计划 / 截止时间…", NoteWindow.MB(ObjBindMethod(this, "CmdItem", "todo-time", id)))
+        m.Add("关联便签…", NoteWindow.MB(ObjBindMethod(this, "AskLink", id)))
+        m.Add()
+        /* 上下移：菜单里也给一份。拖动在事项很多、或者窗口很窄的时候并不好用 */
+        all := TodoStore.Items(this.id)
+        idx := 0
+        for i, x in all {
+            if (x.id = id) {
+                idx := i
+                break
+            }
+        }
+        if (idx > 1)
+            m.Add("上移`tAlt+↑", NoteWindow.MB(ObjBindMethod(this, "MoveItem", id, idx - 1)))
+        if (idx > 0 && idx < all.Length)
+            m.Add("下移`tAlt+↓", NoteWindow.MB(ObjBindMethod(this, "MoveItem", id, idx + 1)))
+        if (this.menuInPre) {
+            m.Add()
+            m.Add("复制这段代码", NoteWindow.MB(ObjBindMethod(this, "CmdItem", "copy-code", id)))
+            ls := Menu()
+            for lang, label in NoteWindow.CodeLangs() {
+                ls.Add(label, NoteWindow.MB(ObjBindMethod(this, "SetItemCodeLang", id, lang)))
+                if (lang = this.menuLang)
+                    ls.Check(label)
+            }
+            m.Add("代码语言", ls)
+        }
+        m.Add()
+        m.Add("删除这个事项…", NoteWindow.MB(ObjBindMethod(this, "ConfirmDeleteItem")))
+        m.Show()
+    }
+
+    /* 「代码语言」：菜单在宿主侧，页面拿不到光标，所以先把光标放回那块 <pre>
+       再让页面去改。页面收到 cmd 时按 item + lang 找块。 */
+    SetItemCodeLang(id, lang) {
+        this.CmdItem("codelang", id, lang)
+    }
+
+    MoveItem(id, idx) {
+        TodoStore.MoveTo(this.id, id, idx)
+        this.PushItems()
+    }
+
+    SetItemStatus(id, status) {
+        TodoStore.SetStatus(id, status)
+        this.PushItems()
+    }
+
+    DoLink(id, noteID) {
+        if !TodoStore.SetLink(id, noteID)
+            App.Toast("关联失败（目标便签可能已经不在了）")
+        this.PushItems()
+    }
+
+    /* 关联便签：列出现有普通便签。待办便签自己不在候选里 —— 关联到另一张
+       待办便签没有意义（点 ↗ 只会跳到另一个列表）。 */
+    AskLink(id) {
+        it := TodoStore.Get(id)
+        if !it
+            return
+        notes := NoteWindow.Store.Query("", "default", 1, Map("kind", 0))
+        m := Menu()
+        if (it.link_note_id > 0)
+            m.Add("取消关联", NoteWindow.MB(ObjBindMethod(this, "DoLink", id, 0)))
+        if !notes.Length
+            m.Add("（还没有普通便签）", (*) => App.Toast("先新建一张普通便签再来关联"))
+        for n in notes {
+            label := (n.title = "" ? "（无标题 #" n.id "）" : n.title)
+            m.Add(label, NoteWindow.MB(ObjBindMethod(this, "DoLink", id, n.id)))
+            if (n.id = it.link_note_id)
+                m.Check(label)
+        }
+        m.Show()
+    }
+
+    /* 待办页的 cmd：带上事项 id，页面据此决定作用于哪一张卡片 */
+    CmdItem(name, id, arg := "") {
+        json := '{"type":"cmd","name":' JsonQuote(name)
+        json .= ',"item":' id
+        if (arg != "")
+            json .= ',"lang":' JsonQuote(arg)
+        json .= '}'
+        this.Send(json)
+    }
+
 
     /* 正文里的右键菜单：全是"编辑这段文字"的动作。
        每一项都只是 postMessage 一条 cmd 回页面去执行 —— 菜单是原生菜单，
@@ -1196,6 +1531,10 @@ NoteDeferNew() {
 
 NoteDeferList() {
     SetTimer(() => App.ShowList(), -10)
+}
+
+NoteDeferTodo() {
+    SetTimer(() => App.NewTodoNote(), -10)
 }
 
 ; 图片消息：闭包捕获 id/raw，跑在 SetTimer 的独立线程里

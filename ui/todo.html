@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>待办</title>
+  <!-- note.css 里的主题变量、富文本排版、代码块、勾选框、图片遮罩全都复用：
+       两个页面必须是"同一张便签的不同内容"，长相不能分叉。 -->
+  <link rel="stylesheet" href="note.css">
+  <link rel="stylesheet" href="todo.css">
+  <link rel="stylesheet" href="vendor/highlight-github.css">
+</head>
+
+<body data-color="yellow">
+  <div class="note" id="note">
+    <header class="bar" id="bar">
+      <div class="drag-zone"></div>
+      <div class="tools">
+        <button class="tool" id="btnPin" title="置顶" aria-label="置顶">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <path d="M9 4h6l-1 6 3 3H7l3-3-1-6z" fill="none" stroke="currentColor" stroke-width="1.6"
+              stroke-linejoin="round" />
+            <path d="M12 13v7" stroke="currentColor" stroke-width="1.6" />
+          </svg>
+        </button>
+        <button class="tool" id="btnMenu" title="更多" aria-label="更多">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <circle cx="6" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="18" cy="12" r="1.6" fill="currentColor" />
+          </svg>
+        </button>
+        <button class="tool close" id="btnClose" title="收起这张待办（删除请用右键菜单）" aria-label="收起">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 待办专用操作条：新建 / 筛选 / 进度 -->
+    <div class="todotools">
+      <button id="btnAdd" class="add" title="新事项（Ctrl+Enter）">+ 新事项</button>
+      <select id="fltSel" class="flt" title="只看某一类">
+        <option value="all">全部</option>
+        <option value="open">未完成</option>
+        <option value="overdue">已逾期</option>
+        <option value="done">已完成</option>
+      </select>
+      <span class="grow"></span>
+      <span class="prog" id="prog">0/0</span>
+    </div>
+
+    <main class="items" id="items"></main>
+
+    <div class="empty" id="empty" hidden>
+      <div>还没有事项</div>
+      <div class="sub">点上面的「+ 新事项」开始，每件事都有独立的时间、状态和提醒</div>
+    </div>
+
+    <footer class="status" id="status">
+      <span id="hint"></span>
+      <span id="count"></span>
+    </footer>
+
+    <div class="grip" id="grip" title="拖动调整大小"></div>
+  </div>
+
+  <!-- 时间胶囊的行内弹层。不用系统对话框：便签窗口最窄只有 180px 宽，
+       原生日期框会把它撑得一塌糊涂。 -->
+  <div class="tp" id="tp" hidden>
+    <div class="tp-row">
+      <label for="tpStart">计划开始</label>
+      <input type="datetime-local" id="tpStart" step="1">
+    </div>
+    <div class="tp-row">
+      <label for="tpDue">预计完成</label>
+      <input type="datetime-local" id="tpDue" step="1">
+    </div>
+    <div class="tp-foot">
+      <button id="tpClear" class="ghost">清除</button>
+      <span class="grow"></span>
+      <button id="tpCancel" class="ghost">取消</button>
+      <button id="tpOk" class="primary">确定</button>
+    </div>
+  </div>
+
+  <!-- 单事项的 Markdown 源码。只做"一个事项"的源码编辑，不做整页 md：
+       一页十几个块同时变源码没有使用场景，还会让 Ctrl+M 的语义变含糊。 -->
+  <div class="mdp" id="mdp" hidden>
+    <div class="mdp-box">
+      <div class="mdp-head">Markdown 源码 <span id="mdpName"></span></div>
+      <textarea id="mdpText" spellcheck="false" placeholder="这个事项的 Markdown…"></textarea>
+      <div class="mdp-foot">
+        <button id="mdpCancel" class="ghost">取消</button>
+        <span class="grow"></span>
+        <button id="mdpOk" class="primary">应用（Ctrl+Enter）</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="lightbox" id="lightbox" hidden>
+    <img id="lightboxImg" alt="">
+  </div>
+
+  <!-- 代码块右上角的「复制」。必须放在所有 .ti-body 外面：放进 <pre> 会被
+       着色重绘冲掉，放进正文会被当成内容存进库。 -->
+  <button class="codecopy" id="codeCopy" type="button" hidden title="复制这段代码">
+    <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor"
+        stroke-width="1.8" />
+      <path d="M6.5 15H5.5A2.5 2.5 0 0 1 3 12.5v-7A2.5 2.5 0 0 1 5.5 3h7A2.5 2.5 0 0 1 15 5.5v1"
+        fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+    </svg>
+    <span id="codeCopyText">复制</span>
+  </button>
+
+  <!-- 选区浮动工具条。哪一段正文被选中就作用于哪一个 .ti-body。 -->
+  <div class="floatbar" id="floatbar" hidden>
+    <button data-cmd="bold" title="加粗 Ctrl+B"><b>B</b></button>
+    <button data-cmd="italic" title="斜体 Ctrl+I"><i>I</i></button>
+    <button data-cmd="strikeThrough" title="删除线"><s>S</s></button>
+    <button data-cmd="formatBlock:h2" title="标题">H</button>
+    <button data-cmd="insertUnorderedList" title="无序列表">•</button>
+    <button data-cmd="insertOrderedList" title="有序列表">1.</button>
+    <button data-cmd="code" title="行内代码">&lt;/&gt;</button>
+    <button data-cmd="codeblock" title="代码块" class="mono">{ }</button>
+    <button data-cmd="link" title="插入链接">
+      <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+        <path d="M10.5 13.5a3.6 3.6 0 0 0 5.1 0l2.2-2.2a3.6 3.6 0 0 0-5.1-5.1l-1.2 1.2" fill="none"
+          stroke="currentColor" stroke-width="1.9" stroke-linecap="round" />
+        <path d="M13.5 10.5a3.6 3.6 0 0 0-5.1 0l-2.2 2.2a3.6 3.6 0 0 0 5.1 5.1l1.2-1.2" fill="none"
+          stroke="currentColor" stroke-width="1.9" stroke-linecap="round" />
+      </svg>
+    </button>
+    <button data-cmd="insertHorizontalRule" title="分割线">&#8212;</button>
+  </div>
+
+  <script src="vendor/highlight.min.js"></script>
+  <script src="code-hl.js"></script>
+  <script src="md.js"></script>
+  <script src="editor-core.js"></script>
+  <script src="todo.js"></script>
+</body>
+
+</html>

@@ -158,6 +158,15 @@
     name.textContent = n.title || '（无标题）';
     row1.appendChild(name);
 
+    /* 类型徽标：一眼分清"普通便签"和"待办便签"，不用点进去看 */
+    if (n.kind === 'todo') {
+      const k = document.createElement('span');
+      k.className = 'badge kind-todo';
+      k.textContent = '待办';
+      k.title = '这是一张待办便签（一页多个事项）';
+      row1.appendChild(k);
+    }
+
     if (n.pinned) {
       const pin = document.createElement('span');
       pin.className = 'pin';
@@ -183,7 +192,20 @@
 
     const ex = document.createElement('div');
     ex.className = 'excerpt';
-    ex.textContent = n.excerpt || '（空白便签）';
+    /* 待办便签的摘要位置放"进度"而不是正文片段：那张便签的价值就是
+       "还剩几件事、有没有逾期"，摘要反而不重要。 */
+    if (n.kind === 'todo' && typeof n.tTotal === 'number') {
+      ex.className = 'excerpt todo-prog';
+      if (n.tTotal === 0) {
+        ex.textContent = '还没有事项';
+      } else {
+        ex.textContent = n.tDone + '/' + n.tTotal
+          + (n.tOverdue ? ' · ' + n.tOverdue + ' 条逾期' : '');
+        if (n.tOverdue) ex.classList.add('over');
+      }
+    } else {
+      ex.textContent = n.excerpt || '（空白便签）';
+    }
     main.appendChild(ex);
 
     row.appendChild(main);

@@ -327,6 +327,21 @@ button.primary:active { filter: brightness(.94); }
   line-height: 16px;
 }
 
+/* 待办便签的类型徽标：用强调色描边，和"已收起"那种灰底中性标记区分开 */
+.badge.kind-todo {
+  background: transparent;
+  border: 1px solid rgba(192, 138, 46, .55);
+  color: #96581c;
+  line-height: 14px;
+}
+
+/* 待办便签在摘要位置显示进度（3/7 · 2 条逾期） */
+.excerpt.todo-prog {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.excerpt.todo-prog.over { color: #c0392b; }
+
 /* 快捷键角标：等宽一点、描边而不是填充，和"已收起"区分开 ——
    它标的是"这张便签能用快捷键叫出来"，是好事，不是状态提示 */
 .hk {
